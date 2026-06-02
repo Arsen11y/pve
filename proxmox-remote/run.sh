@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 # run.sh вЂ” СѓРґР°Р»С‘РЅРЅС‹Р№ Р·Р°РїСѓСЃРє СЃ GitHub Р±РµР· РєР»РѕРЅРёСЂРѕРІР°РЅРёСЏ СЂРµРїРѕР·РёС‚РѕСЂРёСЏ.
