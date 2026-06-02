@@ -2,41 +2,26 @@
 set -euo pipefail
 
 # run.sh — удалённый запуск с GitHub без клонирования репозитория.
+#
 # Пример:
-# DE_RAW_URL="https://raw.githubusercontent.com/OWNER/REPO/main/proxmox-remote" \
-# bash -c "$(curl -fsSL https://raw.githubusercontent.com/OWNER/REPO/main/proxmox-remote/run.sh)" -- check
+# export DE_RAW_URL="https://raw.githubusercontent.com/Arsen11y/PVE/main/proxmox-remote"
+# curl -fsSL "$DE_RAW_URL/run.sh" | DE_RAW_URL="$DE_RAW_URL" bash -s -- check
+# curl -fsSL "$DE_RAW_URL/run.sh" | DE_RAW_URL="$DE_RAW_URL" bash -s -- run isp
 
-DEFAULT_RAW_URL="https://raw.githubusercontent.com/OWNER/REPO/main/proxmox-remote"
+DEFAULT_RAW_URL="https://raw.githubusercontent.com/Arsen11y/PVE/main/proxmox-remote"
 DE_RAW_URL="${DE_RAW_URL:-$DEFAULT_RAW_URL}"
-INV_FILE="${DE_INVENTORY:-/root/de-inventory.env}"
-TMP_DIR="/tmp/de-remote-runner"
+INV="${DE_INVENTORY:-/root/de-inventory.env}"
 
-usage() {
-  cat <<EOFUSAGE
-Удалённый запуск ДЭ-команд через Proxmox/qemu-guest-agent.
-
-Команды:
-  check                 проверить VMID и qemu-guest-agent
-  print-inventory       вывести шаблон inventory.env
-  ifaces <target>       показать ip -br a внутри ВМ
-  status <target>       показать hostname/ip/route внутри ВМ
-  run <target>          запустить настройку цели
-  run module1           запустить ISP, HQ-RTR, BR-RTR, HQ-SRV, BR-SRV, HQ-CLI
-
-Цели:
-  isp | hq-rtr | br-rtr | hq-srv | br-srv | hq-cli | module1
-
-Переменные:
-  DE_RAW_URL            raw URL папки proxmox-remote в GitHub
-  DE_INVENTORY          путь к inventory.env, по умолчанию /root/de-inventory.env
-
-Первый запуск:
-  curl -fsSL "$DE_RAW_URL/inventory.example.env" > /root/de-inventory.env
-  nano /root/de-inventory.env
-  curl -fsSL "$DE_RAW_URL/run.sh" | DE_RAW_URL="$DE_RAW_URL" bash -s -- check
-
-EOFUSAGE
-}
+if [[ -f "$INV" ]]; then
+  # shellcheck disable=SC1090
+  source "$INV"
+else
+  echo "Не найден inventory: $INV"
+  echo "Создай его командой:"
+  echo "curl -fsSL \"$DE_RAW_URL/inventory.example.env\" > /root/de-inventory.env"
+  echo "nano /root/de-inventory.env"
+  exit 1
+fi
 
 need_root() {
   if [[ "${EUID}" -ne 0 ]]; then
@@ -45,152 +30,187 @@ need_root() {
   fi
 }
 
-fetch() {
-  local remote_path="$1"
-  local local_path="$2"
-  mkdir -p "$(dirname "$local_path")"
-  curl -fsSL "$DE_RAW_URL/$remote_path" -o "$local_path"
+usage() {
+  cat <<'EOF'
+run.sh — удалённый запуск команд ДЭ через Proxmox qemu-guest-agent.
+
+Команды:
+  check                 Проверить наличие ВМ и qemu-guest-agent
+  list                  Показать qm list
+  ifaces <target>       Показать ip -br a внутри ВМ
+  status <target>       Короткий статус ВМ: hostname, ip, route
+  run <target>          Запустить настройку узла
+
+Targets:
+  isp
+  hq-rtr
+  br-rtr
+  hq-srv
+  br-srv
+  hq-cli
+  module1
+
+Примеры:
+  curl -fsSL "$DE_RAW_URL/run.sh" | DE_RAW_URL="$DE_RAW_URL" bash -s -- check
+  curl -fsSL "$DE_RAW_URL/run.sh" | DE_RAW_URL="$DE_RAW_URL" bash -s -- ifaces isp
+  curl -fsSL "$DE_RAW_URL/run.sh" | DE_RAW_URL="$DE_RAW_URL" bash -s -- run isp
+EOF
 }
 
-prepare_tmp() {
-  rm -rf "$TMP_DIR"
-  mkdir -p "$TMP_DIR/scripts/lib" "$TMP_DIR/scripts/module1"
-  fetch "scripts/lib/common.sh" "$TMP_DIR/scripts/lib/common.sh"
-  for f in 01-isp.sh 02-hq-rtr.sh 03-br-rtr.sh 04-hq-srv.sh 05-br-srv.sh 06-hq-cli.sh; do
-    fetch "scripts/module1/$f" "$TMP_DIR/scripts/module1/$f"
-  done
+target_vmid() {
+  case "$1" in
+    isp) echo "${ISP_VMID:?ISP_VMID is empty}" ;;
+    hq-rtr) echo "${HQ_RTR_VMID:?HQ_RTR_VMID is empty}" ;;
+    br-rtr) echo "${BR_RTR_VMID:?BR_RTR_VMID is empty}" ;;
+    hq-srv) echo "${HQ_SRV_VMID:?HQ_SRV_VMID is empty}" ;;
+    br-srv) echo "${BR_SRV_VMID:?BR_SRV_VMID is empty}" ;;
+    hq-cli) echo "${HQ_CLI_VMID:?HQ_CLI_VMID is empty}" ;;
+    *) echo "UNKNOWN_TARGET"; return 1 ;;
+  esac
 }
 
-load_inventory() {
-  if [[ ! -f "$INV_FILE" ]]; then
-    echo "Не найден inventory: $INV_FILE"
-    echo "Создай его командой:"
-    echo "curl -fsSL '$DE_RAW_URL/inventory.example.env' > $INV_FILE"
+target_script() {
+  case "$1" in
+    isp) echo "scripts/module1/01-isp.sh" ;;
+    hq-rtr) echo "scripts/module1/02-hq-rtr.sh" ;;
+    br-rtr) echo "scripts/module1/03-br-rtr.sh" ;;
+    hq-srv) echo "scripts/module1/04-hq-srv.sh" ;;
+    br-srv) echo "scripts/module1/05-br-srv.sh" ;;
+    hq-cli) echo "scripts/module1/06-hq-cli.sh" ;;
+    *) echo "UNKNOWN_SCRIPT"; return 1 ;;
+  esac
+}
+
+vm_exists() {
+  local vmid="$1"
+  [[ -f "/etc/pve/qemu-server/${vmid}.conf" ]]
+}
+
+require_vm() {
+  local target="$1"
+  local vmid="$2"
+  if ! vm_exists "$vmid"; then
+    echo "ОШИБКА: ВМ для target='$target' с VMID=$vmid не найдена."
+    echo
+    echo "Сейчас на Proxmox есть:"
+    qm list || true
+    echo
+    echo "Исправь VMID в $INV"
     exit 1
   fi
-  # shellcheck disable=SC1090
-  source "$INV_FILE"
 }
 
-vmid_for_target() {
-  case "$1" in
-    isp) echo "$ISP_VMID" ;;
-    hq-rtr) echo "$HQ_RTR_VMID" ;;
-    br-rtr) echo "$BR_RTR_VMID" ;;
-    hq-srv) echo "$HQ_SRV_VMID" ;;
-    br-srv) echo "$BR_SRV_VMID" ;;
-    hq-cli) echo "$HQ_CLI_VMID" ;;
-    *) echo "" ;;
-  esac
+guest_ping() {
+  local vmid="$1"
+  qm agent "$vmid" ping >/dev/null 2>&1
 }
 
-script_for_target() {
-  case "$1" in
-    isp) echo "$TMP_DIR/scripts/module1/01-isp.sh" ;;
-    hq-rtr) echo "$TMP_DIR/scripts/module1/02-hq-rtr.sh" ;;
-    br-rtr) echo "$TMP_DIR/scripts/module1/03-br-rtr.sh" ;;
-    hq-srv) echo "$TMP_DIR/scripts/module1/04-hq-srv.sh" ;;
-    br-srv) echo "$TMP_DIR/scripts/module1/05-br-srv.sh" ;;
-    hq-cli) echo "$TMP_DIR/scripts/module1/06-hq-cli.sh" ;;
-    *) echo "" ;;
-  esac
+guest_exec_lc() {
+  local vmid="$1"
+  local cmd="$2"
+  qm guest exec "$vmid" -- bash -lc "$cmd"
 }
 
-guest_exec_script() {
+fetch() {
+  local rel="$1"
+  curl -fsSL "$DE_RAW_URL/$rel"
+}
+
+run_one() {
   local target="$1"
   local vmid
-  local script
-  vmid="$(vmid_for_target "$target")"
-  script="$(script_for_target "$target")"
+  local script_rel
 
-  if [[ -z "$vmid" || -z "$script" || ! -f "$script" ]]; then
-    echo "Неизвестная цель: $target"
-    exit 1
-  fi
+  vmid="$(target_vmid "$target")"
+  script_rel="$(target_script "$target")"
+
+  require_vm "$target" "$vmid"
 
   echo
   echo "============================================================"
-  echo "TARGET=$target VMID=$vmid"
+  echo "TARGET=$target VMID=$vmid SCRIPT=$script_rel"
   echo "============================================================"
 
-  qm agent "$vmid" ping >/dev/null
+  if ! guest_ping "$vmid"; then
+    echo "ОШИБКА: qemu-guest-agent не отвечает в VMID=$vmid ($target)."
+    echo "Проверь внутри ВМ: apt-get install -y qemu-guest-agent && systemctl enable --now qemu-guest-agent"
+    exit 1
+  fi
 
   {
-    echo 'set -euo pipefail'
-    echo "cat > /tmp/de_inventory.env <<'EOFINVENTORY'"
-    cat "$INV_FILE"
-    echo "EOFINVENTORY"
-    echo 'source /tmp/de_inventory.env'
-    echo "cat > /tmp/de_common.sh <<'EOFCOMMON'"
-    cat "$TMP_DIR/scripts/lib/common.sh"
-    echo "EOFCOMMON"
-    echo 'source /tmp/de_common.sh'
-    cat "$script"
+    echo "set -euo pipefail"
+    echo "cat > /tmp/de_inventory.env <<'EOF_INV'"
+    cat "$INV"
+    echo "EOF_INV"
+    echo "source /tmp/de_inventory.env"
+    fetch "$script_rel"
   } | qm guest exec "$vmid" -- bash -s
 }
 
-check() {
-  echo "Proxmox VM list:"
+check_all() {
+  echo "DE_RAW_URL=$DE_RAW_URL"
+  echo "INVENTORY=$INV"
+  echo
   qm list
   echo
-  for target in isp hq-rtr br-rtr hq-srv br-srv hq-cli; do
-    local vmid
-    vmid="$(vmid_for_target "$target")"
-    printf "%-7s VMID=%s ... " "$target" "$vmid"
-    if qm agent "$vmid" ping >/dev/null 2>&1; then
-      echo OK
+  for target in isp hq-rtr hq-srv hq-cli br-rtr br-srv; do
+    vmid="$(target_vmid "$target")"
+    printf "%-7s VMID=%-6s " "$target" "$vmid"
+    if ! vm_exists "$vmid"; then
+      echo "NO_VM"
+      continue
+    fi
+    if guest_ping "$vmid"; then
+      echo "AGENT_OK"
     else
-      echo FAIL
+      echo "AGENT_FAIL"
     fi
   done
 }
 
-show_guest() {
+show_ifaces() {
   local target="$1"
-  local mode="$2"
   local vmid
-  vmid="$(vmid_for_target "$target")"
-  if [[ -z "$vmid" ]]; then
-    echo "Неизвестная цель: $target"
-    exit 1
-  fi
-  if [[ "$mode" == "ifaces" ]]; then
-    qm guest exec "$vmid" -- bash -lc "ip -br a"
-  else
-    qm guest exec "$vmid" -- bash -lc "hostname; ip -br a; ip route; systemctl is-active qemu-guest-agent || true"
-  fi
+  vmid="$(target_vmid "$target")"
+  require_vm "$target" "$vmid"
+  guest_exec_lc "$vmid" "ip -br a"
+}
+
+show_status() {
+  local target="$1"
+  local vmid
+  vmid="$(target_vmid "$target")"
+  require_vm "$target" "$vmid"
+  guest_exec_lc "$vmid" "hostname; echo '--- ip ---'; ip -br a; echo '--- route ---'; ip route"
 }
 
 main() {
   need_root
-
-  if [[ "${1:-}" == "print-inventory" ]]; then
-    curl -fsSL "$DE_RAW_URL/inventory.example.env"
-    exit 0
-  fi
-
-  load_inventory
-  prepare_tmp
-
   case "${1:-}" in
     check)
-      check
+      check_all
+      ;;
+    list)
+      qm list
       ;;
     ifaces)
-      show_guest "${2:-}" ifaces
+      show_ifaces "${2:-}"
       ;;
     status)
-      show_guest "${2:-}" status
+      show_status "${2:-}"
       ;;
     run)
       case "${2:-}" in
         module1)
-          for target in isp hq-rtr br-rtr hq-srv br-srv hq-cli; do
-            guest_exec_script "$target"
-          done
+          run_one isp
+          run_one hq-rtr
+          run_one br-rtr
+          run_one hq-srv
+          run_one br-srv
+          run_one hq-cli
           ;;
         isp|hq-rtr|br-rtr|hq-srv|br-srv|hq-cli)
-          guest_exec_script "$2"
+          run_one "$2"
           ;;
         *)
           usage
