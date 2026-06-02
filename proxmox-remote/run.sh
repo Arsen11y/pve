@@ -1,9 +1,9 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 set -euo pipefail
 
-# run.sh — удалённый запуск с GitHub без клонирования репозитория.
+# run.sh вЂ” СѓРґР°Р»С‘РЅРЅС‹Р№ Р·Р°РїСѓСЃРє СЃ GitHub Р±РµР· РєР»РѕРЅРёСЂРѕРІР°РЅРёСЏ СЂРµРїРѕР·РёС‚РѕСЂРёСЏ.
 #
-# Пример:
+# РџСЂРёРјРµСЂ:
 # export DE_RAW_URL="https://raw.githubusercontent.com/Arsen11y/PVE/main/proxmox-remote"
 # curl -fsSL "$DE_RAW_URL/run.sh" | DE_RAW_URL="$DE_RAW_URL" bash -s -- check
 # curl -fsSL "$DE_RAW_URL/run.sh" | DE_RAW_URL="$DE_RAW_URL" bash -s -- run isp
@@ -16,8 +16,8 @@ if [[ -f "$INV" ]]; then
   # shellcheck disable=SC1090
   source "$INV"
 else
-  echo "Не найден inventory: $INV"
-  echo "Создай его командой:"
+  echo "РќРµ РЅР°Р№РґРµРЅ inventory: $INV"
+  echo "РЎРѕР·РґР°Р№ РµРіРѕ РєРѕРјР°РЅРґРѕР№:"
   echo "curl -fsSL \"$DE_RAW_URL/inventory.example.env\" > /root/de-inventory.env"
   echo "nano /root/de-inventory.env"
   exit 1
@@ -25,21 +25,21 @@ fi
 
 need_root() {
   if [[ "${EUID}" -ne 0 ]]; then
-    echo "Запусти от root на Proxmox."
+    echo "Р—Р°РїСѓСЃС‚Рё РѕС‚ root РЅР° Proxmox."
     exit 1
   fi
 }
 
 usage() {
   cat <<'EOF'
-run.sh — удалённый запуск команд ДЭ через Proxmox qemu-guest-agent.
+run.sh вЂ” СѓРґР°Р»С‘РЅРЅС‹Р№ Р·Р°РїСѓСЃРє РєРѕРјР°РЅРґ Р”Р­ С‡РµСЂРµР· Proxmox qemu-guest-agent.
 
-Команды:
-  check                 Проверить наличие ВМ и qemu-guest-agent
-  list                  Показать qm list
-  ifaces <target>       Показать ip -br a внутри ВМ
-  status <target>       Короткий статус ВМ: hostname, ip, route
-  run <target>          Запустить настройку узла
+РљРѕРјР°РЅРґС‹:
+  check                 РџСЂРѕРІРµСЂРёС‚СЊ РЅР°Р»РёС‡РёРµ Р’Рњ Рё qemu-guest-agent
+  list                  РџРѕРєР°Р·Р°С‚СЊ qm list
+  ifaces <target>       РџРѕРєР°Р·Р°С‚СЊ ip -br a РІРЅСѓС‚СЂРё Р’Рњ
+  status <target>       РљРѕСЂРѕС‚РєРёР№ СЃС‚Р°С‚СѓСЃ Р’Рњ: hostname, ip, route
+  run <target>          Р—Р°РїСѓСЃС‚РёС‚СЊ РЅР°СЃС‚СЂРѕР№РєСѓ СѓР·Р»Р°
 
 Targets:
   isp
@@ -50,7 +50,7 @@ Targets:
   hq-cli
   module1
 
-Примеры:
+РџСЂРёРјРµСЂС‹:
   curl -fsSL "$DE_RAW_URL/run.sh" | DE_RAW_URL="$DE_RAW_URL" bash -s -- check
   curl -fsSL "$DE_RAW_URL/run.sh" | DE_RAW_URL="$DE_RAW_URL" bash -s -- ifaces isp
   curl -fsSL "$DE_RAW_URL/run.sh" | DE_RAW_URL="$DE_RAW_URL" bash -s -- run isp
@@ -90,12 +90,12 @@ require_vm() {
   local target="$1"
   local vmid="$2"
   if ! vm_exists "$vmid"; then
-    echo "ОШИБКА: ВМ для target='$target' с VMID=$vmid не найдена."
+    echo "РћРЁРР‘РљРђ: Р’Рњ РґР»СЏ target='$target' СЃ VMID=$vmid РЅРµ РЅР°Р№РґРµРЅР°."
     echo
-    echo "Сейчас на Proxmox есть:"
+    echo "РЎРµР№С‡Р°СЃ РЅР° Proxmox РµСЃС‚СЊ:"
     qm list || true
     echo
-    echo "Исправь VMID в $INV"
+    echo "РСЃРїСЂР°РІСЊ VMID РІ $INV"
     exit 1
   fi
 }
@@ -132,8 +132,8 @@ run_one() {
   echo "============================================================"
 
   if ! guest_ping "$vmid"; then
-    echo "ОШИБКА: qemu-guest-agent не отвечает в VMID=$vmid ($target)."
-    echo "Проверь внутри ВМ: apt-get install -y qemu-guest-agent && systemctl enable --now qemu-guest-agent"
+    echo "РћРЁРР‘РљРђ: qemu-guest-agent РЅРµ РѕС‚РІРµС‡Р°РµС‚ РІ VMID=$vmid ($target)."
+    echo "РџСЂРѕРІРµСЂСЊ РІРЅСѓС‚СЂРё Р’Рњ: apt-get install -y qemu-guest-agent && systemctl enable --now qemu-guest-agent"
     exit 1
   fi
 
@@ -143,6 +143,8 @@ run_one() {
     cat "$INV"
     echo "EOF_INV"
     echo "source /tmp/de_inventory.env"
+    fetch "scripts/lib/common.sh"
+    echo
     fetch "$script_rel"
   } | qm guest exec "$vmid" -- bash -s
 }
@@ -225,3 +227,4 @@ main() {
 }
 
 main "$@"
+
