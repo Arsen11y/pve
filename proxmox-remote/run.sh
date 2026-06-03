@@ -36,9 +36,11 @@ run.sh вЂ” СѓРґР°Р»С‘РЅРЅС‹Р№ Р·Р°РїСѓСЃРє 
 
 РљРѕРјР°РЅРґС‹:
   check                 РџСЂРѕРІРµСЂРёС‚СЊ РЅР°Р»РёС‡РёРµ Р’Рњ Рё qemu-guest-agent
+  check module1         Deep checks for module1 GRE/OSPF/DNS/end-to-end
   list                  РџРѕРєР°Р·Р°С‚СЊ qm list
   ifaces <target>       РџРѕРєР°Р·Р°С‚СЊ ip -br a РІРЅСѓС‚СЂРё Р’Рњ
   status <target>       РљРѕСЂРѕС‚РєРёР№ СЃС‚Р°С‚СѓСЃ Р’Рњ: hostname, ip, route
+  status module1        Deep status for module1 GRE/OSPF/DNS/end-to-end
   run <target>          Р—Р°РїСѓСЃС‚РёС‚СЊ РЅР°СЃС‚СЂРѕР№РєСѓ СѓР·Р»Р°
 
 Targets:
@@ -186,11 +188,38 @@ show_status() {
   guest_exec_lc "$vmid" "hostname; echo '--- ip ---'; ip -br a; echo '--- route ---'; ip route"
 }
 
+show_module1_status() {
+  echo "=== ISP: NAT and internet ==="
+  guest_exec_lc "$ISP_VMID" "hostname; ip -br a; ip route; cat /proc/sys/net/ipv4/ip_forward; nft list ruleset; ping -c 4 8.8.8.8 || true"
+
+  echo
+  echo "=== HQ-RTR: GRE and OSPF ==="
+  guest_exec_lc "$HQ_RTR_VMID" "hostname; ip -br a; ip tunnel show gre1; ping -c 4 10.10.10.2 || true; vtysh -c 'show ip ospf neighbor' || true; vtysh -c 'show ip route ospf' || true; ip route | grep -E '192\\.168\\.10\\.0/28.*10\\.10\\.10\\.2' || true"
+
+  echo
+  echo "=== BR-RTR: GRE and OSPF ==="
+  guest_exec_lc "$BR_RTR_VMID" "hostname; ip -br a; ip tunnel show gre1; ping -c 4 10.10.10.1 || true; vtysh -c 'show ip ospf neighbor' || true; vtysh -c 'show ip route ospf' || true; ip route | grep -E '192\\.168\\.100\\.0/27.*10\\.10\\.10\\.1|192\\.168\\.200\\.0/27.*10\\.10\\.10\\.1|192\\.168\\.99\\.0/29.*10\\.10\\.10\\.1' || true"
+
+  echo
+  echo "=== DNS on HQ-SRV ==="
+  guest_exec_lc "$HQ_SRV_VMID" "systemctl is-active named-direct || true; ss -tulpen | grep ':53' || true; dig +short @127.0.0.1 hq-srv.au-team.irpo || true; dig +short @127.0.0.1 web.au-team.irpo || true; dig +short @127.0.0.1 docker.au-team.irpo || true"
+
+  echo
+  echo "=== End-to-end ==="
+  guest_exec_lc "$HQ_SRV_VMID" "hostname; ping -c 4 192.168.10.2 || true"
+  guest_exec_lc "$HQ_CLI_VMID" "hostname; ping -c 4 192.168.10.2 || true"
+  guest_exec_lc "$BR_SRV_VMID" "hostname; ping -c 4 192.168.100.2 || true; ping -c 4 192.168.200.11 || ping -c 4 192.168.200.10 || true"
+}
+
 main() {
   need_root
   case "${1:-}" in
     check)
-      check_all
+      if [[ "${2:-}" == "module1" ]]; then
+        show_module1_status
+      else
+        check_all
+      fi
       ;;
     list)
       qm list
@@ -199,7 +228,11 @@ main() {
       show_ifaces "${2:-}"
       ;;
     status)
-      show_status "${2:-}"
+      if [[ "${2:-}" == "module1" ]]; then
+        show_module1_status
+      else
+        show_status "${2:-}"
+      fi
       ;;
     run)
       case "${2:-}" in
