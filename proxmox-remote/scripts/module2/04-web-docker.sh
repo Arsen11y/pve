@@ -12,10 +12,11 @@ if [[ -f /tmp/de-run/scripts/lib/common.sh ]]; then
 fi
 
 echo "Planned Module 2 web/Docker actions"
-echo "- BR-SRV Docker app testapp + db on port ${APP_PORT:-8080}, app DB ${APP_DB_NAME:-appdb}."
-echo "- HQ-SRV Apache + MariaDB, database ${WEB_DB_NAME:-webdb}, user ${WEB_DB_USER:-webc}."
-echo "- Prepare index.php and image assets from inventory-defined sources."
+echo "- BR-SRV Docker Compose file ${WIKI_COMPOSE_FILE:-wiki.yml} with services ${WIKI_SERVICE:-wiki} and ${WIKI_DB_SERVICE:-mariadb}."
+echo "- MediaWiki database ${APP_DB_NAME:-mediawiki}, user ${APP_DB_USER:-wiki}, password from APP_DB_PASS, external port ${APP_PORT:-8080}."
+echo "- HQ-SRV Moodle with Apache + MariaDB, database ${MOODLE_DB_NAME:-moodledb}, user ${MOODLE_DB_USER:-moodle}, admin password from MOODLE_ADMIN_PASS."
+echo "- Publish ${WIKI_DOMAIN:-wiki.au-team.irpo} and ${MOODLE_DOMAIN:-moodle.au-team.irpo} only after reverse proxy step."
 echo "Read-only local checks:"
 ss -tulpen | grep -E ":(${APP_PORT:-8080}|80|443)" || true
 command -v docker || true
-echo "TODO: no Docker, Apache, or MariaDB changes in scaffold mode."
+echo "TODO: no Docker, MediaWiki, Moodle, Apache, or MariaDB changes in scaffold mode."

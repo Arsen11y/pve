@@ -12,10 +12,12 @@ if [[ -f /tmp/de-run/scripts/lib/common.sh ]]; then
 fi
 
 echo "Planned Module 2 proxy/DNAT actions"
-echo "- Configure HQ-RTR/BR-RTR DNAT for ${APP_PORT:-8080} and SSH 2026."
-echo "- Configure ISP nginx reverse proxy for web.${DOMAIN:-au-team.irpo} and docker.${DOMAIN:-au-team.irpo}."
-echo "- Protect web.${DOMAIN:-au-team.irpo} with basic auth user ${WEB_AUTH_USER:-WEBc}."
+echo "- Configure HQ-RTR DNAT port ${DNAT_PORT:-2024} to ${DNAT_HQ_TARGET:-192.168.100.2:2024}."
+echo "- Configure BR-RTR DNAT port ${DNAT_PORT:-2024} to ${DNAT_BR_TARGET:-192.168.10.2:2024}."
+echo "- Configure nginx reverse proxy on ${REVERSE_PROXY_HOST:-hq-rtr.au-team.irpo}."
+echo "- Proxy ${MOODLE_DOMAIN:-moodle.au-team.irpo} to HQ-SRV Moodle."
+echo "- Proxy ${WIKI_DOMAIN:-wiki.au-team.irpo} to BR-SRV MediaWiki on port ${APP_PORT:-8080}."
 echo "Read-only local checks:"
 nft list ruleset || true
-ss -tulpen | grep -E ":(${APP_PORT:-8080}|2026|80|443)" || true
+ss -tulpen | grep -E ":(${APP_PORT:-8080}|${DNAT_PORT:-2024}|80|443)" || true
 echo "TODO: no nftables or nginx changes in scaffold mode."

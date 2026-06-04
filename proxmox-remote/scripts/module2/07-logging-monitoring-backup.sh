@@ -15,6 +15,7 @@ echo "Planned Module 2 logging/monitoring/backup actions"
 echo "- Configure CUPS PDF printer ${PRINTER_NAME:-PDF} on HQ-SRV and default printer on HQ-CLI."
 echo "- Configure rsyslog server on HQ-SRV into ${SYSLOG_DIR:-/var/log/remote} and client forwarding."
 echo "- Configure monitoring at ${MON_DOMAIN:-mon.au-team.irpo} with user ${MON_USER:-admin}."
+echo "- Include Moodle, NFS/RAID5 state, and service configs in HQ-SRV backup scope only after exact PDF backup requirement is confirmed."
 echo "- Configure HQ-SRV backup into ${BACKUP_DIR:-/backup} after backup scope is confirmed."
 echo "Read-only local checks:"
 systemctl is-active rsyslog || true

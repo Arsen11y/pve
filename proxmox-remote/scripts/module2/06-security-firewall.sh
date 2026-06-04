@@ -13,9 +13,10 @@ fi
 
 echo "Planned Module 2 security/firewall actions"
 echo "- Create CA with common name: ${CA_COMMON_NAME:-au-team.irpo Demo CA}."
-echo "- Enable HTTPS for HQ-SRV after certificate data is confirmed."
+echo "- Enable HTTPS for HQ-SRV Moodle after certificate data is confirmed."
+echo "- Review HTTPS/proxy needs for ${WIKI_DOMAIN:-wiki.au-team.irpo} before changing nginx."
 echo "- Replace GRE with protected tunnel only after exact tunnel requirements are known."
-echo "- Harden HQ-RTR/BR-RTR firewall using inventory-defined service list."
+echo "- Harden HQ-RTR/BR-RTR firewall using inventory-defined service list, including ${DNAT_PORT:-2024}, ${APP_PORT:-8080}, 80, and 443 as required."
 echo "Read-only local checks:"
 nft list ruleset || true
 ip tunnel show || true

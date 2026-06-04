@@ -8,6 +8,8 @@ REQUEST_COMMAND="${1:-}"
 REQUEST_SUBCOMMAND="${2:-}"
 DEMO_LOG="${DEMO_LOG:-/root/module1-demo-run.log}"
 MODULE1_CHECK_RESULT="${MODULE1_CHECK_RESULT:-/root/module1-check-success.txt}"
+GUEST_EXEC_POLL_INTERVAL="${GUEST_EXEC_POLL_INTERVAL:-5}"
+GUEST_EXEC_WAIT_TIMEOUT="${GUEST_EXEC_WAIT_TIMEOUT:-900}"
 INVENTORY_LOADED=0
 
 load_inventory() {
@@ -148,60 +150,10 @@ guest_exec_capture() {
     qm_rc=$?
   fi
 
-  if ! python3 - "$raw_file" "$qerr_file" "$out_file" "$err_file" "$meta_file" "$qm_rc" <<'PY'
-import json
-import sys
-
-raw_path, qerr_path, out_path, err_path, meta_path, qm_rc = sys.argv[1:]
-raw = open(raw_path, "r", encoding="utf-8", errors="replace").read()
-qerr = open(qerr_path, "r", encoding="utf-8", errors="replace").read()
-
-try:
-    data = json.loads(raw) if raw.strip() else {}
-except Exception as exc:
-    open(out_path, "w", encoding="utf-8").write(raw)
-    open(err_path, "w", encoding="utf-8").write(
-        f"Failed to parse qm guest exec JSON: {exc}\n{qerr}"
-    )
-    open(meta_path, "w", encoding="utf-8").write(
-        f"exitcode={qm_rc}\npid=\nstate=parse_failed\n"
-    )
-    sys.exit(0)
-
-out = data.get("out-data", data.get("out_data", "")) or ""
-err = data.get("err-data", data.get("err_data", "")) or ""
-if "error" in data:
-    err = (err + "\n" if err else "") + str(data["error"])
-if qerr:
-    err = (err + "\n" if err else "") + qerr
-
-pid = data.get("pid", "")
-exitcode = data.get("exitcode", data.get("exit-code"))
-exited = data.get("exited")
-
-if exitcode is None:
-    if pid:
-        exitcode = 124
-        state = "running"
-    elif exited in (1, True):
-        exitcode = 0
-        state = "exited"
-    else:
-        exitcode = int(qm_rc)
-        state = "qm_failed" if int(qm_rc) else "unknown"
-else:
-    state = "exited"
-
-open(out_path, "w", encoding="utf-8").write(str(out))
-open(err_path, "w", encoding="utf-8").write(str(err))
-open(meta_path, "w", encoding="utf-8").write(
-    f"exitcode={int(exitcode)}\npid={pid}\nstate={state}\n"
-)
-PY
-  then
+  if ! parse_guest_exec_result "$raw_file" "$qerr_file" "$out_file" "$err_file" "$meta_file" "$qm_rc"; then
     cp "$raw_file" "$out_file"
     {
-      echo "Failed to run local JSON parser for qm guest exec."
+      echo "Failed to run local parser for qm guest exec."
       cat "$qerr_file"
     } >"$err_file"
     {
@@ -211,7 +163,149 @@ PY
     } >"$meta_file"
   fi
 
+  if [[ "$(meta_value "$meta_file" state)" == "running" && -n "$(meta_value "$meta_file" pid)" ]]; then
+    poll_guest_exec_status "$vmid" "$(meta_value "$meta_file" pid)" "$out_file" "$err_file" "$meta_file"
+  fi
+
   rm -f "$raw_file" "$qerr_file"
+}
+
+parse_guest_exec_result() {
+  local raw_file="$1"
+  local qerr_file="$2"
+  local out_file="$3"
+  local err_file="$4"
+  local meta_file="$5"
+  local qm_rc="$6"
+
+  python3 - "$raw_file" "$qerr_file" "$out_file" "$err_file" "$meta_file" "$qm_rc" <<'PY'
+import json
+import re
+import sys
+
+raw_path, qerr_path, out_path, err_path, meta_path, qm_rc = sys.argv[1:]
+raw = open(raw_path, "r", encoding="utf-8", errors="replace").read()
+qerr = open(qerr_path, "r", encoding="utf-8", errors="replace").read()
+combined = raw + "\n" + qerr
+
+try:
+    data = json.loads(raw) if raw.strip() else {}
+except Exception:
+    data = {}
+
+def int_field(*names):
+    for name in names:
+        if name in data and data[name] not in (None, ""):
+            try:
+                return int(data[name])
+            except Exception:
+                pass
+    for name in names:
+        pattern = rf'(?mi)^\s*{re.escape(name)}\s*[:=]\s*(-?\d+|true|false)\s*$'
+        match = re.search(pattern, combined)
+        if match:
+            value = match.group(1).lower()
+            if value == "true":
+                return 1
+            if value == "false":
+                return 0
+            return int(value)
+    return None
+
+def pid_field():
+    pid = int_field("pid")
+    if pid is not None:
+        return pid
+    match = re.search(r'(?i)\bpid\b[^0-9]*(\d+)', combined)
+    if match:
+        return int(match.group(1))
+    return None
+
+out = data.get("out-data", data.get("out_data", "")) or ""
+err = data.get("err-data", data.get("err_data", "")) or ""
+if "error" in data:
+    err = (err + "\n" if err else "") + str(data["error"])
+timeout_pid_message = bool(re.search(r'(?i)timeout reached.*returning pid', combined))
+if qerr and not timeout_pid_message:
+    err = (err + "\n" if err else "") + qerr
+
+pid = pid_field()
+exitcode = int_field("exitcode", "exit-code")
+exited = int_field("exited")
+
+if exitcode is None:
+    if pid is not None:
+        exitcode = 124
+        state = "running"
+    elif exited in (1, True):
+        exitcode = 0
+        state = "exited"
+    elif exited in (0, False):
+        exitcode = 124
+        state = "running"
+    else:
+        exitcode = int(qm_rc)
+        state = "qm_failed" if int(qm_rc) else "unknown"
+else:
+    state = "exited"
+
+open(out_path, "w", encoding="utf-8").write(str(out))
+open(err_path, "w", encoding="utf-8").write(str(err))
+open(meta_path, "w", encoding="utf-8").write(
+    f"exitcode={int(exitcode)}\npid={pid or ''}\nstate={state}\n"
+)
+PY
+}
+
+poll_guest_exec_status() {
+  local vmid="$1"
+  local pid="$2"
+  local out_file="$3"
+  local err_file="$4"
+  local meta_file="$5"
+  local status_raw_file
+  local status_qerr_file
+  local status_rc
+  local state
+  local waited=0
+
+  while (( waited < GUEST_EXEC_WAIT_TIMEOUT )); do
+    sleep "$GUEST_EXEC_POLL_INTERVAL"
+    waited=$((waited + GUEST_EXEC_POLL_INTERVAL))
+    status_raw_file="$(mktemp)"
+    status_qerr_file="$(mktemp)"
+
+    if qm guest exec-status "$vmid" "$pid" >"$status_raw_file" 2>"$status_qerr_file"; then
+      status_rc=0
+    else
+      status_rc=$?
+    fi
+
+    parse_guest_exec_result "$status_raw_file" "$status_qerr_file" "$out_file" "$err_file" "$meta_file" "$status_rc"
+    rm -f "$status_raw_file" "$status_qerr_file"
+
+    state="$(meta_value "$meta_file" state)"
+    if [[ "$state" == "exited" ]]; then
+      return 0
+    fi
+    if [[ "$state" != "running" ]]; then
+      return 1
+    fi
+  done
+
+  {
+    cat "$err_file" 2>/dev/null || true
+    echo "Global guest exec wait timeout reached after ${GUEST_EXEC_WAIT_TIMEOUT}s."
+    echo "Process may still be running in VM."
+    echo "Next hint: qm guest exec-status $vmid $pid"
+  } >"${err_file}.tmp"
+  mv "${err_file}.tmp" "$err_file"
+  {
+    echo "exitcode=124"
+    echo "pid=$pid"
+    echo "state=wait_timeout"
+  } >"$meta_file"
+  return 1
 }
 
 meta_value() {
@@ -788,15 +882,15 @@ MODULE 2 PLANNED STEPS
 [PLAN] 00-prereq.sh
   Verify Module 1 baseline, DNS, qemu-guest-agent, and SSH 2026.
 [PLAN] 01-hq-srv-storage.sh
-  RAID ${RAID_LEVEL:-0} on HQ-SRV, ${RAID_MOUNT:-/raid}, NFS ${NFS_DIR:-/raid/nfs}, HQ-CLI automount ${NFS_CLIENT_MOUNT:-/mnt/nfs}.
+  RAID${RAID_LEVEL:-5} from ${RAID_DISK_COUNT:-3} x ${RAID_DISK_SIZE_GB:-1}GB disks on HQ-SRV, ${RAID_DEVICE:-/dev/md0}, mount ${RAID_MOUNT:-/raid5}, NFS ${NFS_DIR:-/raid5/nfs}, HQ-CLI automount ${NFS_CLIENT_MOUNT:-/mnt/nfs}.
 [PLAN] 02-br-srv-domain.sh
-  Samba DC on BR-SRV for ${DOMAIN:-au-team.irpo}/${REALM:-AU-TEAM.IRPO}, HQ users, group ${HQ_GROUP:-hq}, HQ-CLI domain join.
+  Samba DC on BR-SRV for ${DOMAIN:-au-team.irpo}/${REALM:-AU-TEAM.IRPO}, users ${DOMAIN_USER_TEMPLATE:-user{N}hq}, group ${HQ_GROUP:-hq}, import ${USERS_CSV_PATH:-/opt/users.csv}, HQ-CLI domain join.
 [PLAN] 03-time-ansible.sh
-  Chrony via ${TIME_SERVER:-isp.au-team.irpo}, Ansible on BR-SRV, report ${ANSIBLE_REPORT_DIR:-/etc/ansible/PC-INFO}.
+  Chrony server selected by NTP_SERVER_ROLE=${NTP_SERVER_ROLE:-inventory-select} from ${NTP_SERVER_CANDIDATES:-isp,hq-rtr}, Ansible on BR-SRV, report ${ANSIBLE_REPORT_DIR:-/etc/ansible/PC-INFO}, install ${HQ_CLI_BROWSER:-Yandex Browser} on HQ-CLI.
 [PLAN] 04-web-docker.sh
-  Docker app on BR-SRV port ${APP_PORT:-8080}, Apache/MariaDB on HQ-SRV with DB ${WEB_DB_NAME:-webdb}.
+  MediaWiki + MariaDB on BR-SRV using ${WIKI_COMPOSE_FILE:-wiki.yml}, services ${WIKI_SERVICE:-wiki}/${WIKI_DB_SERVICE:-mariadb}, DB ${APP_DB_NAME:-mediawiki}, user ${APP_DB_USER:-wiki}, port ${APP_PORT:-8080}; Moodle on HQ-SRV with DB ${MOODLE_DB_NAME:-moodledb}, user ${MOODLE_DB_USER:-moodle}.
 [PLAN] 05-proxy-dnat.sh
-  DNAT on routers, ISP reverse proxy for web.${DOMAIN:-au-team.irpo} and docker.${DOMAIN:-au-team.irpo}.
+  DNAT port ${DNAT_PORT:-2024}: HQ-RTR -> ${DNAT_HQ_TARGET:-192.168.100.2:2024}, BR-RTR -> ${DNAT_BR_TARGET:-192.168.10.2:2024}; nginx reverse proxy on ${REVERSE_PROXY_HOST:-hq-rtr.au-team.irpo} for ${MOODLE_DOMAIN:-moodle.au-team.irpo} and ${WIKI_DOMAIN:-wiki.au-team.irpo}.
 [PLAN] 06-security-firewall.sh
   Basic auth, CA/HTTPS, protected tunnel, router firewalls.
 [PLAN] 07-logging-monitoring-backup.sh
