@@ -4,20 +4,32 @@ set -euo pipefail
 DEFAULT_RAW_URL="https://raw.githubusercontent.com/Arsen11y/PVE/main/proxmox-remote"
 DE_RAW_URL="${DE_RAW_URL:-$DEFAULT_RAW_URL}"
 INV="${DE_INVENTORY:-/root/de-inventory.env}"
+REQUEST_COMMAND="${1:-}"
+REQUEST_SUBCOMMAND="${2:-}"
+DEMO_LOG="${DEMO_LOG:-/root/module1-demo-run.log}"
+MODULE1_CHECK_RESULT="${MODULE1_CHECK_RESULT:-/root/module1-check-success.txt}"
+INVENTORY_LOADED=0
 
-if [[ -f "$INV" ]]; then
-  # shellcheck disable=SC1090
-  source "$INV"
-else
+load_inventory() {
+  if [[ -f "$INV" ]]; then
+    # shellcheck disable=SC1090
+    source "$INV"
+    HQ_SRV_PVE_NET="${HQ_SRV_PVE_NET:-net6}"
+    HQ_CLI_PVE_NET="${HQ_CLI_PVE_NET:-net6}"
+    INVENTORY_LOADED=1
+    return 0
+  fi
+
   echo "Inventory not found: $INV"
   echo "Create it on Proxmox:"
   echo "curl -fsSL \"$DE_RAW_URL/inventory.example.env\" > /root/de-inventory.env"
   echo "nano /root/de-inventory.env"
   exit 1
-fi
+}
 
-HQ_SRV_PVE_NET="${HQ_SRV_PVE_NET:-net6}"
-HQ_CLI_PVE_NET="${HQ_CLI_PVE_NET:-net6}"
+if [[ ! ( "$REQUEST_COMMAND" == "demo" && "$REQUEST_SUBCOMMAND" == "module1" ) ]]; then
+  load_inventory
+fi
 
 need_root() {
   if [[ "${EUID}" -ne 0 ]]; then
@@ -33,6 +45,7 @@ run.sh - remote Proxmox runner through qemu-guest-agent.
 Commands:
   check                    Check VM presence and qemu-guest-agent
   check module1            Compact Module 1 GRE/OSPF/DNS/end-to-end report
+  demo module1             Prepare VLANs, run all Module 1 targets, then check
   prepare-vlans            Add/replace Proxmox VLAN tags for HQ-SRV/HQ-CLI
   list                     Show qm list
   ifaces <target>          Show ip -br a inside VM
@@ -328,7 +341,7 @@ run_one() {
   if ! guest_ping "$vmid"; then
     echo "[FAIL] qemu-guest-agent is not available"
     echo "Next hint: inside VM run apt-get install -y qemu-guest-agent && systemctl enable --now qemu-guest-agent"
-    exit 1
+    return 1
   fi
   echo "[OK] qemu-guest-agent is available"
 
@@ -345,7 +358,7 @@ EOF
 )"
 
   if ! guest_exec_pretty "$target" "$vmid" "RUN" "$cmd"; then
-    exit 1
+    return 1
   fi
 }
 
@@ -542,6 +555,121 @@ prepare_vlans() {
   set_vm_net_tag "hq-cli" "$HQ_CLI_VMID" "$HQ_CLI_PVE_NET" 200 "vmbr1003"
 }
 
+ensure_demo_inventory() {
+  if [[ -f "$INV" ]]; then
+    echo "[OK] inventory exists: $INV"
+    return 0
+  fi
+
+  echo "[STEP] create inventory: $INV"
+  mkdir -p "$(dirname "$INV")"
+  curl -fsSL "$DE_RAW_URL/inventory.example.env" > "$INV"
+  echo "[OK] inventory created from $DE_RAW_URL/inventory.example.env"
+}
+
+check_proxmox_internet() {
+  echo "[STEP] check Proxmox internet"
+  if curl -fsSL --connect-timeout 10 "$DE_RAW_URL/run.sh" >/dev/null; then
+    echo "[OK] Proxmox can reach $DE_RAW_URL"
+  else
+    echo "[FAIL] Proxmox cannot reach $DE_RAW_URL"
+    echo "Next hint: check Proxmox DNS/default route and try: curl -I $DE_RAW_URL/run.sh"
+    return 1
+  fi
+}
+
+demo_step() {
+  local label="$1"
+  shift
+
+  echo
+  echo "[STEP] $label"
+  if "$@"; then
+    echo "[OK] $label"
+    return 0
+  fi
+
+  echo "[FAIL] $label"
+  return 1
+}
+
+write_module1_result() {
+  local result="$1"
+  echo "$result" > "$MODULE1_CHECK_RESULT"
+  echo "$result"
+  echo "Check result saved to $MODULE1_CHECK_RESULT"
+}
+
+demo_module1_failed() {
+  write_module1_result "RESULT: MODULE 1 FAILED"
+  echo "Full demo log: $DEMO_LOG"
+  return 1
+}
+
+demo_module1() {
+  mkdir -p "$(dirname "$DEMO_LOG")"
+  : > "$DEMO_LOG"
+  exec > >(tee -a "$DEMO_LOG") 2>&1
+
+  echo "============================================================"
+  echo "MODULE 1 DEMO RUN"
+  echo "============================================================"
+  echo "DE_RAW_URL=$DE_RAW_URL"
+  echo "INVENTORY=$INV"
+  echo "LOG=$DEMO_LOG"
+  echo
+
+  if ! check_proxmox_internet; then
+    demo_module1_failed
+    return 1
+  fi
+  if ! ensure_demo_inventory; then
+    demo_module1_failed
+    return 1
+  fi
+
+  if [[ "$INVENTORY_LOADED" -ne 1 ]]; then
+    load_inventory
+  fi
+
+  if ! demo_step "prepare-vlans" prepare_vlans; then
+    demo_module1_failed
+    return 1
+  fi
+  if ! demo_step "run isp" run_one isp; then
+    demo_module1_failed
+    return 1
+  fi
+  if ! demo_step "run hq-rtr" run_one hq-rtr; then
+    demo_module1_failed
+    return 1
+  fi
+  if ! demo_step "run br-rtr" run_one br-rtr; then
+    demo_module1_failed
+    return 1
+  fi
+  if ! demo_step "run hq-srv" run_one hq-srv; then
+    demo_module1_failed
+    return 1
+  fi
+  if ! demo_step "run br-srv" run_one br-srv; then
+    demo_module1_failed
+    return 1
+  fi
+  if ! demo_step "run hq-cli" run_one hq-cli; then
+    demo_module1_failed
+    return 1
+  fi
+
+  if demo_step "check module1" show_module1_status; then
+    write_module1_result "RESULT: MODULE 1 PASSED"
+    echo "Full demo log: $DEMO_LOG"
+    return 0
+  fi
+
+  demo_module1_failed
+}
+
 main() {
   need_root
   case "${1:-}" in
@@ -554,6 +682,17 @@ main() {
       ;;
     list)
       qm list
+      ;;
+    demo)
+      case "${2:-}" in
+        module1)
+          demo_module1
+          ;;
+        *)
+          usage
+          exit 1
+          ;;
+      esac
       ;;
     prepare-vlans)
       prepare_vlans
