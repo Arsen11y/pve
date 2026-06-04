@@ -25,16 +25,19 @@ cat > "/etc/net/ifaces/$HQ_RTR_LAN_IF.100/options" <<EOFINNER
 TYPE=vlan
 HOST=$HQ_RTR_LAN_IF
 VID=100
+BOOTPROTO=static
 EOFINNER
 cat > "/etc/net/ifaces/$HQ_RTR_LAN_IF.200/options" <<EOFINNER
 TYPE=vlan
 HOST=$HQ_RTR_LAN_IF
 VID=200
+BOOTPROTO=static
 EOFINNER
 cat > "/etc/net/ifaces/$HQ_RTR_LAN_IF.999/options" <<EOFINNER
 TYPE=vlan
 HOST=$HQ_RTR_LAN_IF
 VID=999
+BOOTPROTO=static
 EOFINNER
 
 echo "$HQ_RTR_VLAN100_IP" > "/etc/net/ifaces/$HQ_RTR_LAN_IF.100/ipv4address"

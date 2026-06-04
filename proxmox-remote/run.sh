@@ -1,13 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# run.sh вЂ” СѓРґР°Р»С‘РЅРЅС‹Р№ Р·Р°РїСѓСЃРє СЃ GitHub Р±РµР· РєР»РѕРЅРёСЂРѕРІР°РЅРёСЏ СЂРµРїРѕР·РёС‚РѕСЂРёСЏ.
-#
-# РџСЂРёРјРµСЂ:
-# export DE_RAW_URL="https://raw.githubusercontent.com/Arsen11y/PVE/main/proxmox-remote"
-# curl -fsSL "$DE_RAW_URL/run.sh" | DE_RAW_URL="$DE_RAW_URL" bash -s -- check
-# curl -fsSL "$DE_RAW_URL/run.sh" | DE_RAW_URL="$DE_RAW_URL" bash -s -- run isp
-
 DEFAULT_RAW_URL="https://raw.githubusercontent.com/Arsen11y/PVE/main/proxmox-remote"
 DE_RAW_URL="${DE_RAW_URL:-$DEFAULT_RAW_URL}"
 INV="${DE_INVENTORY:-/root/de-inventory.env}"
@@ -16,32 +9,36 @@ if [[ -f "$INV" ]]; then
   # shellcheck disable=SC1090
   source "$INV"
 else
-  echo "РќРµ РЅР°Р№РґРµРЅ inventory: $INV"
-  echo "РЎРѕР·РґР°Р№ РµРіРѕ РєРѕРјР°РЅРґРѕР№:"
+  echo "Inventory not found: $INV"
+  echo "Create it on Proxmox:"
   echo "curl -fsSL \"$DE_RAW_URL/inventory.example.env\" > /root/de-inventory.env"
   echo "nano /root/de-inventory.env"
   exit 1
 fi
 
+HQ_SRV_PVE_NET="${HQ_SRV_PVE_NET:-net6}"
+HQ_CLI_PVE_NET="${HQ_CLI_PVE_NET:-net6}"
+
 need_root() {
   if [[ "${EUID}" -ne 0 ]]; then
-    echo "Р—Р°РїСѓСЃС‚Рё РѕС‚ root РЅР° Proxmox."
+    echo "Run this script as root on Proxmox."
     exit 1
   fi
 }
 
 usage() {
   cat <<'EOF'
-run.sh вЂ” СѓРґР°Р»С‘РЅРЅС‹Р№ Р·Р°РїСѓСЃРє РєРѕРјР°РЅРґ Р”Р­ С‡РµСЂРµР· Proxmox qemu-guest-agent.
+run.sh - remote Proxmox runner through qemu-guest-agent.
 
-РљРѕРјР°РЅРґС‹:
-  check                 РџСЂРѕРІРµСЂРёС‚СЊ РЅР°Р»РёС‡РёРµ Р’Рњ Рё qemu-guest-agent
-  check module1         Deep checks for module1 GRE/OSPF/DNS/end-to-end
-  list                  РџРѕРєР°Р·Р°С‚СЊ qm list
-  ifaces <target>       РџРѕРєР°Р·Р°С‚СЊ ip -br a РІРЅСѓС‚СЂРё Р’Рњ
-  status <target>       РљРѕСЂРѕС‚РєРёР№ СЃС‚Р°С‚СѓСЃ Р’Рњ: hostname, ip, route
-  status module1        Deep status for module1 GRE/OSPF/DNS/end-to-end
-  run <target>          Р—Р°РїСѓСЃС‚РёС‚СЊ РЅР°СЃС‚СЂРѕР№РєСѓ СѓР·Р»Р°
+Commands:
+  check                    Check VM presence and qemu-guest-agent
+  check module1            Compact Module 1 GRE/OSPF/DNS/end-to-end report
+  prepare-vlans            Add/replace Proxmox VLAN tags for HQ-SRV/HQ-CLI
+  list                     Show qm list
+  ifaces <target>          Show ip -br a inside VM
+  status <target>          Show hostname, ip and routes inside VM
+  status module1           Same as check module1
+  run <target>             Run target configuration
 
 Targets:
   isp
@@ -51,11 +48,6 @@ Targets:
   br-srv
   hq-cli
   module1
-
-РџСЂРёРјРµСЂС‹:
-  curl -fsSL "$DE_RAW_URL/run.sh" | DE_RAW_URL="$DE_RAW_URL" bash -s -- check
-  curl -fsSL "$DE_RAW_URL/run.sh" | DE_RAW_URL="$DE_RAW_URL" bash -s -- ifaces isp
-  curl -fsSL "$DE_RAW_URL/run.sh" | DE_RAW_URL="$DE_RAW_URL" bash -s -- run isp
 EOF
 }
 
@@ -92,12 +84,12 @@ require_vm() {
   local target="$1"
   local vmid="$2"
   if ! vm_exists "$vmid"; then
-    echo "РћРЁРР‘РљРђ: Р’Рњ РґР»СЏ target='$target' СЃ VMID=$vmid РЅРµ РЅР°Р№РґРµРЅР°."
+    echo "ERROR: VM for target='$target' with VMID=$vmid was not found."
     echo
-    echo "РЎРµР№С‡Р°СЃ РЅР° Proxmox РµСЃС‚СЊ:"
+    echo "Current Proxmox VMs:"
     qm list || true
     echo
-    echo "РСЃРїСЂР°РІСЊ VMID РІ $INV"
+    echo "Fix VMID in $INV"
     exit 1
   fi
 }
@@ -107,21 +99,221 @@ guest_ping() {
   qm agent "$vmid" ping >/dev/null 2>&1
 }
 
-guest_exec_lc() {
-  local vmid="$1"
-  local cmd="$2"
-  qm guest exec "$vmid" -- bash -lc "$cmd"
-}
-
 fetch() {
   local rel="$1"
   curl -fsSL "$DE_RAW_URL/$rel"
+}
+
+base64_file() {
+  local file="$1"
+  if base64 --help 2>&1 | grep -q -- '-w'; then
+    base64 -w0 "$file"
+  else
+    base64 "$file" | tr -d '\n'
+  fi
+}
+
+guest_exec_capture() {
+  local vmid="$1"
+  local cmd="$2"
+  local out_file="$3"
+  local err_file="$4"
+  local meta_file="$5"
+  local raw_file
+  local qerr_file
+  local qm_rc
+
+  raw_file="$(mktemp)"
+  qerr_file="$(mktemp)"
+
+  if qm guest exec "$vmid" -- bash -lc "$cmd" >"$raw_file" 2>"$qerr_file"; then
+    qm_rc=0
+  else
+    qm_rc=$?
+  fi
+
+  if ! python3 - "$raw_file" "$qerr_file" "$out_file" "$err_file" "$meta_file" "$qm_rc" <<'PY'
+import json
+import sys
+
+raw_path, qerr_path, out_path, err_path, meta_path, qm_rc = sys.argv[1:]
+raw = open(raw_path, "r", encoding="utf-8", errors="replace").read()
+qerr = open(qerr_path, "r", encoding="utf-8", errors="replace").read()
+
+try:
+    data = json.loads(raw) if raw.strip() else {}
+except Exception as exc:
+    open(out_path, "w", encoding="utf-8").write(raw)
+    open(err_path, "w", encoding="utf-8").write(
+        f"Failed to parse qm guest exec JSON: {exc}\n{qerr}"
+    )
+    open(meta_path, "w", encoding="utf-8").write(
+        f"exitcode={qm_rc}\npid=\nstate=parse_failed\n"
+    )
+    sys.exit(0)
+
+out = data.get("out-data", data.get("out_data", "")) or ""
+err = data.get("err-data", data.get("err_data", "")) or ""
+if "error" in data:
+    err = (err + "\n" if err else "") + str(data["error"])
+if qerr:
+    err = (err + "\n" if err else "") + qerr
+
+pid = data.get("pid", "")
+exitcode = data.get("exitcode", data.get("exit-code"))
+exited = data.get("exited")
+
+if exitcode is None:
+    if pid:
+        exitcode = 124
+        state = "running"
+    elif exited in (1, True):
+        exitcode = 0
+        state = "exited"
+    else:
+        exitcode = int(qm_rc)
+        state = "qm_failed" if int(qm_rc) else "unknown"
+else:
+    state = "exited"
+
+open(out_path, "w", encoding="utf-8").write(str(out))
+open(err_path, "w", encoding="utf-8").write(str(err))
+open(meta_path, "w", encoding="utf-8").write(
+    f"exitcode={int(exitcode)}\npid={pid}\nstate={state}\n"
+)
+PY
+  then
+    cp "$raw_file" "$out_file"
+    {
+      echo "Failed to run local JSON parser for qm guest exec."
+      cat "$qerr_file"
+    } >"$err_file"
+    {
+      echo "exitcode=$qm_rc"
+      echo "pid="
+      echo "state=parse_failed"
+    } >"$meta_file"
+  fi
+
+  rm -f "$raw_file" "$qerr_file"
+}
+
+meta_value() {
+  local meta_file="$1"
+  local key="$2"
+  awk -F= -v key="$key" '$1 == key {print substr($0, length(key) + 2); exit}' "$meta_file"
+}
+
+print_file_block() {
+  local title="$1"
+  local file="$2"
+  if [[ -s "$file" ]]; then
+    echo "[$title]"
+    cat "$file"
+    echo
+  fi
+}
+
+guest_exec_pretty() {
+  local target="$1"
+  local vmid="$2"
+  local action="$3"
+  local cmd="$4"
+  local quiet_success="${5:-0}"
+  local tmpdir
+  local out_file
+  local err_file
+  local meta_file
+  local exitcode
+  local pid
+  local state
+
+  tmpdir="$(mktemp -d)"
+  out_file="$tmpdir/stdout"
+  err_file="$tmpdir/stderr"
+  meta_file="$tmpdir/meta"
+
+  guest_exec_capture "$vmid" "$cmd" "$out_file" "$err_file" "$meta_file"
+  exitcode="$(meta_value "$meta_file" exitcode)"
+  pid="$(meta_value "$meta_file" pid)"
+  state="$(meta_value "$meta_file" state)"
+
+  if [[ "$quiet_success" == "1" && "$exitcode" == "0" ]]; then
+    rm -rf "$tmpdir"
+    return 0
+  fi
+
+  echo
+  echo "============================================================"
+  echo "[$action] target=$target vmid=$vmid"
+  echo "============================================================"
+  print_file_block "STDOUT" "$out_file"
+  print_file_block "STDERR" "$err_file"
+  echo "[RESULT]"
+  if [[ -n "$pid" ]]; then
+    echo "guest_pid=$pid"
+  fi
+  echo "guest_exitcode=$exitcode"
+  if [[ "$exitcode" == "0" ]]; then
+    echo "status=OK"
+  else
+    echo "status=FAIL"
+    if [[ "$state" == "running" && -n "$pid" ]]; then
+      echo "Next hint: qm guest exec-status $vmid $pid"
+    fi
+  fi
+
+  rm -rf "$tmpdir"
+  [[ "$exitcode" == "0" ]]
+}
+
+install_guest_file() {
+  local target="$1"
+  local vmid="$2"
+  local src="$3"
+  local dest="$4"
+  local mode="${5:-0644}"
+  local b64
+  local cmd
+
+  b64="$(base64_file "$src")"
+  cmd="$(cat <<EOF
+set -e
+mkdir -p "$(dirname "$dest")"
+base64 -d > "$dest" <<'EOF_B64'
+$b64
+EOF_B64
+chmod "$mode" "$dest"
+EOF
+)"
+
+  guest_exec_pretty "$target" "$vmid" "TRANSFER" "$cmd" 1
+}
+
+stage_run_files() {
+  local target="$1"
+  local vmid="$2"
+  local script_rel="$3"
+  local tmpdir
+
+  tmpdir="$(mktemp -d)"
+  mkdir -p "$tmpdir/scripts/lib" "$tmpdir/scripts/module1"
+  cp "$INV" "$tmpdir/de-inventory.env"
+  fetch "scripts/lib/common.sh" > "$tmpdir/scripts/lib/common.sh"
+  fetch "$script_rel" > "$tmpdir/$script_rel"
+
+  install_guest_file "$target" "$vmid" "$tmpdir/de-inventory.env" "/tmp/de-run/de-inventory.env" 0600
+  install_guest_file "$target" "$vmid" "$tmpdir/scripts/lib/common.sh" "/tmp/de-run/scripts/lib/common.sh" 0644
+  install_guest_file "$target" "$vmid" "$tmpdir/$script_rel" "/tmp/de-run/$script_rel" 0644
+
+  rm -rf "$tmpdir"
 }
 
 run_one() {
   local target="$1"
   local vmid
   local script_rel
+  local cmd
 
   vmid="$(target_vmid "$target")"
   script_rel="$(target_script "$target")"
@@ -130,25 +322,31 @@ run_one() {
 
   echo
   echo "============================================================"
-  echo "TARGET=$target VMID=$vmid SCRIPT=$script_rel"
+  echo "[RUN] target=$target vmid=$vmid script=$script_rel"
   echo "============================================================"
 
   if ! guest_ping "$vmid"; then
-    echo "РћРЁРР‘РљРђ: qemu-guest-agent РЅРµ РѕС‚РІРµС‡Р°РµС‚ РІ VMID=$vmid ($target)."
-    echo "РџСЂРѕРІРµСЂСЊ РІРЅСѓС‚СЂРё Р’Рњ: apt-get install -y qemu-guest-agent && systemctl enable --now qemu-guest-agent"
+    echo "[FAIL] qemu-guest-agent is not available"
+    echo "Next hint: inside VM run apt-get install -y qemu-guest-agent && systemctl enable --now qemu-guest-agent"
     exit 1
   fi
+  echo "[OK] qemu-guest-agent is available"
 
-  {
-    echo "set -euo pipefail"
-    echo "cat > /tmp/de_inventory.env <<'EOF_INV'"
-    cat "$INV"
-    echo "EOF_INV"
-    echo "source /tmp/de_inventory.env"
-    fetch "scripts/lib/common.sh"
-    echo
-    fetch "$script_rel"
-  } | qm guest exec "$vmid" -- bash -s
+  stage_run_files "$target" "$vmid" "$script_rel"
+
+  cmd="$(cat <<EOF
+set -euo pipefail
+set -a
+source /tmp/de-run/de-inventory.env
+set +a
+source /tmp/de-run/scripts/lib/common.sh
+source /tmp/de-run/$script_rel
+EOF
+)"
+
+  if ! guest_exec_pretty "$target" "$vmid" "RUN" "$cmd"; then
+    exit 1
+  fi
 }
 
 check_all() {
@@ -177,7 +375,7 @@ show_ifaces() {
   local vmid
   vmid="$(target_vmid "$target")"
   require_vm "$target" "$vmid"
-  guest_exec_lc "$vmid" "ip -br a"
+  guest_exec_pretty "$target" "$vmid" "IFACES" "ip -br a"
 }
 
 show_status() {
@@ -185,30 +383,163 @@ show_status() {
   local vmid
   vmid="$(target_vmid "$target")"
   require_vm "$target" "$vmid"
-  guest_exec_lc "$vmid" "hostname; echo '--- ip ---'; ip -br a; echo '--- route ---'; ip route"
+  guest_exec_pretty "$target" "$vmid" "STATUS" "hostname; echo '--- ip ---'; ip -br a; echo '--- route ---'; ip route"
+}
+
+guest_probe() {
+  local vmid="$1"
+  local cmd="$2"
+  local out_file="$3"
+  local err_file="$4"
+  local meta_file="$5"
+  local exitcode
+
+  guest_exec_capture "$vmid" "$cmd" "$out_file" "$err_file" "$meta_file"
+  exitcode="$(meta_value "$meta_file" exitcode)"
+  [[ "$exitcode" == "0" ]]
+}
+
+module_check_failed=0
+
+module_check_item() {
+  local label="$1"
+  local vmid="$2"
+  local cmd="$3"
+  local reason="$4"
+  local hint="$5"
+  local tmpdir
+  local out_file
+  local err_file
+  local meta_file
+
+  tmpdir="$(mktemp -d)"
+  out_file="$tmpdir/stdout"
+  err_file="$tmpdir/stderr"
+  meta_file="$tmpdir/meta"
+
+  if guest_probe "$vmid" "$cmd" "$out_file" "$err_file" "$meta_file"; then
+    echo "[OK] $label"
+  else
+    module_check_failed=1
+    echo "[FAIL] $label"
+    echo "Reason: $reason"
+    echo "Command: $cmd"
+    echo "Next hint: $hint"
+    print_file_block "STDOUT" "$out_file"
+    print_file_block "STDERR" "$err_file"
+  fi
+
+  rm -rf "$tmpdir"
 }
 
 show_module1_status() {
-  echo "=== ISP: NAT and internet ==="
-  guest_exec_lc "$ISP_VMID" "hostname; ip -br a; ip route; cat /proc/sys/net/ipv4/ip_forward; nft list ruleset; ping -c 4 8.8.8.8 || true"
+  echo
+  echo "============================================================"
+  echo "MODULE 1 CHECK SUMMARY"
+  echo "======================"
+  echo
+
+  module_check_failed=0
+  module_check_item "ISP NAT and internet" "$ISP_VMID" \
+    "ping -c 4 8.8.8.8 >/dev/null" \
+    "ISP cannot ping 8.8.8.8" \
+    "check ip route, nft list ruleset, and ISP WAN DHCP"
+
+  module_check_item "HQ-RTR GRE tunnel" "$HQ_RTR_VMID" \
+    "ip tunnel show gre1 | grep -q 'remote 172.16.2.2' && ping -c 4 10.10.10.2 >/dev/null" \
+    "gre1 is missing or 10.10.10.2 is unreachable" \
+    "check systemctl status gre1-demo --no-pager and ip tunnel show gre1"
+
+  module_check_item "BR-RTR GRE tunnel" "$BR_RTR_VMID" \
+    "ip tunnel show gre1 | grep -q 'remote 172.16.1.2' && ping -c 4 10.10.10.1 >/dev/null" \
+    "gre1 is missing or 10.10.10.1 is unreachable" \
+    "check systemctl status gre1-demo --no-pager and ip tunnel show gre1"
+
+  module_check_item "OSPF neighbor Full on HQ-RTR" "$HQ_RTR_VMID" \
+    "vtysh -c 'show ip ospf neighbor' | grep -q Full" \
+    "OSPF neighbor is not Full on HQ-RTR" \
+    "check vtysh -c 'show ip ospf neighbor' and journalctl -u frr --no-pager -n 80"
+
+  module_check_item "OSPF neighbor Full on BR-RTR" "$BR_RTR_VMID" \
+    "vtysh -c 'show ip ospf neighbor' | grep -q Full" \
+    "OSPF neighbor is not Full on BR-RTR" \
+    "check vtysh -c 'show ip ospf neighbor' and journalctl -u frr --no-pager -n 80"
+
+  module_check_item "DNS service on HQ-SRV" "$HQ_SRV_VMID" \
+    "systemctl is-active --quiet named-direct && ss -tulpen | grep -q ':53' && dig +short @127.0.0.1 hq-srv.au-team.irpo | grep -qx 192.168.100.2 && dig +short @192.168.100.2 hq-srv.au-team.irpo | grep -qx 192.168.100.2" \
+    "named-direct.service inactive or DNS port/queries failed" \
+    "check journalctl -u named-direct --no-pager -n 80"
+
+  module_check_item "DNS records hq-srv/web/docker" "$HQ_SRV_VMID" \
+    "test \"\$(dig +short @127.0.0.1 hq-srv.au-team.irpo)\" = 192.168.100.2 && test \"\$(dig +short @127.0.0.1 web.au-team.irpo)\" = 172.16.1.1 && test \"\$(dig +short @127.0.0.1 docker.au-team.irpo)\" = 172.16.2.1" \
+    "DNS records hq-srv/web/docker do not match expected addresses" \
+    "check /var/lib/bind/etc/zones/au-team.irpo.zone and named-checkconf -t /var/lib/bind /etc/named-direct.conf"
+
+  module_check_item "HQ-SRV -> BR-SRV ping" "$HQ_SRV_VMID" \
+    "ping -c 4 192.168.10.2 >/dev/null" \
+    "HQ-SRV cannot reach BR-SRV" \
+    "check OSPF routes and BR-SRV gateway"
+
+  module_check_item "HQ-CLI -> BR-SRV ping" "$HQ_CLI_VMID" \
+    "ping -c 4 192.168.10.2 >/dev/null" \
+    "HQ-CLI cannot reach BR-SRV" \
+    "check DHCP lease, default route, and OSPF routes"
+
+  module_check_item "BR-SRV -> HQ-SRV ping" "$BR_SRV_VMID" \
+    "ping -c 4 192.168.100.2 >/dev/null" \
+    "BR-SRV cannot reach HQ-SRV" \
+    "check BR-SRV gateway and OSPF routes"
+
+  module_check_item "BR-SRV -> HQ-CLI ping" "$BR_SRV_VMID" \
+    "ping -c 4 192.168.200.11 >/dev/null || ping -c 4 192.168.200.10 >/dev/null" \
+    "BR-SRV cannot reach HQ-CLI on 192.168.200.11 or 192.168.200.10" \
+    "check HQ-CLI DHCP lease and OSPF route to 192.168.200.0/27"
 
   echo
-  echo "=== HQ-RTR: GRE and OSPF ==="
-  guest_exec_lc "$HQ_RTR_VMID" "hostname; ip -br a; ip tunnel show gre1; ping -c 4 10.10.10.2 || true; vtysh -c 'show ip ospf neighbor' || true; vtysh -c 'show ip route ospf' || true; ip route | grep -E '192\\.168\\.10\\.0/28.*10\\.10\\.10\\.2' || true"
+  if [[ "$module_check_failed" -eq 0 ]]; then
+    echo "RESULT: MODULE 1 PASSED"
+  else
+    echo "RESULT: MODULE 1 FAILED"
+    return 1
+  fi
+}
 
-  echo
-  echo "=== BR-RTR: GRE and OSPF ==="
-  guest_exec_lc "$BR_RTR_VMID" "hostname; ip -br a; ip tunnel show gre1; ping -c 4 10.10.10.1 || true; vtysh -c 'show ip ospf neighbor' || true; vtysh -c 'show ip route ospf' || true; ip route | grep -E '192\\.168\\.100\\.0/27.*10\\.10\\.10\\.1|192\\.168\\.200\\.0/27.*10\\.10\\.10\\.1|192\\.168\\.99\\.0/29.*10\\.10\\.10\\.1' || true"
+set_vm_net_tag() {
+  local target="$1"
+  local vmid="$2"
+  local net_key="$3"
+  local tag="$4"
+  local expected_bridge="$5"
+  local current
+  local updated
 
-  echo
-  echo "=== DNS on HQ-SRV ==="
-  guest_exec_lc "$HQ_SRV_VMID" "systemctl is-active named-direct || true; ss -tulpen | grep ':53' || true; dig +short @127.0.0.1 hq-srv.au-team.irpo || true; dig +short @127.0.0.1 web.au-team.irpo || true; dig +short @127.0.0.1 docker.au-team.irpo || true"
+  current="$(qm config "$vmid" | awk -v key="${net_key}:" '$1 == key {sub("^[^ ]+ ", ""); print; exit}')"
+  if [[ -z "$current" ]]; then
+    echo "[FAIL] $target VMID=$vmid has no $net_key in qm config"
+    return 1
+  fi
 
+  if [[ "$current" != *"bridge=$expected_bridge"* ]]; then
+    echo "[WARN] $target $net_key bridge differs from expected $expected_bridge: $current"
+  fi
+
+  updated="$(printf '%s' "$current" | sed -E 's/,tag=[^,]+//g'),tag=$tag"
+  if [[ "$current" == "$updated" ]]; then
+    echo "[OK] $target VMID=$vmid $net_key already has tag=$tag"
+    return 0
+  fi
+
+  qm set "$vmid" "--$net_key" "$updated"
+  echo "[OK] $target VMID=$vmid $net_key updated: $updated"
+}
+
+prepare_vlans() {
   echo
-  echo "=== End-to-end ==="
-  guest_exec_lc "$HQ_SRV_VMID" "hostname; ping -c 4 192.168.10.2 || true"
-  guest_exec_lc "$HQ_CLI_VMID" "hostname; ping -c 4 192.168.10.2 || true"
-  guest_exec_lc "$BR_SRV_VMID" "hostname; ping -c 4 192.168.100.2 || true; ping -c 4 192.168.200.11 || ping -c 4 192.168.200.10 || true"
+  echo "============================================================"
+  echo "PREPARE PROXMOX VLAN TAGS"
+  echo "============================================================"
+  set_vm_net_tag "hq-srv" "$HQ_SRV_VMID" "$HQ_SRV_PVE_NET" 100 "vmbr1003"
+  set_vm_net_tag "hq-cli" "$HQ_CLI_VMID" "$HQ_CLI_PVE_NET" 200 "vmbr1003"
 }
 
 main() {
@@ -223,6 +554,9 @@ main() {
       ;;
     list)
       qm list
+      ;;
+    prepare-vlans)
+      prepare_vlans
       ;;
     ifaces)
       show_ifaces "${2:-}"
@@ -260,4 +594,3 @@ main() {
 }
 
 main "$@"
-

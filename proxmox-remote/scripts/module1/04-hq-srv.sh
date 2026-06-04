@@ -1,15 +1,20 @@
 hostnamectl set-hostname HQ-SRV
 
 write_eth_static "$HQ_SRV_IF" "$HQ_SRV_IP" "$HQ_SRV_GW"
-echo "search $DOMAIN" > "/etc/net/ifaces/$HQ_SRV_IF/resolv.conf"
-echo "nameserver 192.168.100.2" >> "/etc/net/ifaces/$HQ_SRV_IF/resolv.conf"
+cat > "/etc/net/ifaces/$HQ_SRV_IF/resolv.conf" <<EOFINNER
+nameserver 8.8.8.8
+nameserver 1.1.1.1
+nameserver 77.88.8.8
+EOFINNER
 restart_network_safe
 cat > /etc/resolv.conf <<EOFINNER
-search $DOMAIN
-nameserver 192.168.100.2
+nameserver 8.8.8.8
+nameserver 1.1.1.1
+nameserver 77.88.8.8
 EOFINNER
 
-safe_apt_install openssh-server sudo bind bind-utils tzdata
+apt-get update
+apt-get install -y bind bind-utils sudo openssh-server tzdata
 timedatectl set-timezone "$TZ"
 
 id "$SSH_USER" >/dev/null 2>&1 || useradd -m -u 2026 -s /bin/bash "$SSH_USER"
@@ -136,6 +141,15 @@ named-checkconf -t /var/lib/bind /etc/named-direct.conf 2>/dev/null || true
 systemctl daemon-reload
 systemctl enable named-direct.service
 systemctl restart named-direct.service
+
+cat > "/etc/net/ifaces/$HQ_SRV_IF/resolv.conf" <<EOFINNER
+search $DOMAIN
+nameserver 192.168.100.2
+EOFINNER
+cat > /etc/resolv.conf <<EOFINNER
+search $DOMAIN
+nameserver 192.168.100.2
+EOFINNER
 
 hostname || true
 ip -br a || true
