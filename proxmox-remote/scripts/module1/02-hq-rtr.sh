@@ -1,5 +1,21 @@
 hostnamectl set-hostname HQ-RTR
 
+write_eth_static "$HQ_RTR_WAN_IF" "$HQ_RTR_WAN_IP" "$HQ_RTR_WAN_GW"
+cat > "/etc/net/ifaces/$HQ_RTR_WAN_IF/resolv.conf" <<EOFINNER
+nameserver 8.8.8.8
+nameserver 1.1.1.1
+nameserver 77.88.8.8
+EOFINNER
+cat > /etc/resolv.conf <<EOFINNER
+nameserver 8.8.8.8
+nameserver 1.1.1.1
+nameserver 77.88.8.8
+EOFINNER
+restart_network_safe
+ip -br a || true
+ip route || true
+ping -c 4 "$HQ_RTR_WAN_GW" || true
+
 safe_apt_install nftables sudo dhcp-server frr tzdata
 timedatectl set-timezone "$TZ"
 
@@ -8,8 +24,6 @@ echo "$NET_ADMIN_USER:$DEMO_PASS" | chpasswd
 mkdir -p /etc/sudoers.d
 echo "$NET_ADMIN_USER ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/$NET_ADMIN_USER"
 chmod 440 "/etc/sudoers.d/$NET_ADMIN_USER"
-
-write_eth_static "$HQ_RTR_WAN_IF" "$HQ_RTR_WAN_IP" "$HQ_RTR_WAN_GW"
 
 ensure_iface_dir "$HQ_RTR_LAN_IF"
 cat > "/etc/net/ifaces/$HQ_RTR_LAN_IF/options" <<EOFINNER
