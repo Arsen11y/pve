@@ -27,7 +27,7 @@ load_inventory() {
   exit 1
 }
 
-if [[ ! ( "$REQUEST_COMMAND" == "demo" && "$REQUEST_SUBCOMMAND" == "module1" ) ]]; then
+if [[ ! ( "$REQUEST_COMMAND" == "demo" && ( "$REQUEST_SUBCOMMAND" == "module1" || "$REQUEST_SUBCOMMAND" == "module2" ) ) ]]; then
   load_inventory
 fi
 
@@ -45,7 +45,10 @@ run.sh - remote Proxmox runner through qemu-guest-agent.
 Commands:
   check                    Check VM presence and qemu-guest-agent
   check module1            Compact Module 1 GRE/OSPF/DNS/end-to-end report
+  check module2            Module 2 prereq checks only
   demo module1             Prepare VLANs, run all Module 1 targets, then check
+  demo module2             Check prereq and print planned Module 2 steps
+  prereq module2           Same as check module2
   prepare-vlans            Add/replace Proxmox VLAN tags for HQ-SRV/HQ-CLI
   list                     Show qm list
   ifaces <target>          Show ip -br a inside VM
@@ -670,15 +673,175 @@ demo_module1() {
   demo_module1_failed
 }
 
+module2_failed=0
+
+module2_fail() {
+  local label="$1"
+  local reason="$2"
+  local hint="$3"
+
+  module2_failed=1
+  echo "[FAIL] $label"
+  echo "Reason: $reason"
+  echo "Next hint: $hint"
+}
+
+module2_ok() {
+  local label="$1"
+  echo "[OK] $label"
+}
+
+module2_agent_check() {
+  local label="$1"
+  local vmid="$2"
+
+  if guest_ping "$vmid"; then
+    module2_ok "$label"
+  else
+    module2_fail "$label" "qemu-guest-agent is not reachable" "check VM power state and qemu-guest-agent service"
+  fi
+}
+
+module2_guest_check() {
+  local label="$1"
+  local vmid="$2"
+  local cmd="$3"
+  local reason="$4"
+  local hint="$5"
+  local tmpdir
+  local out_file
+  local err_file
+  local meta_file
+
+  tmpdir="$(mktemp -d)"
+  out_file="$tmpdir/stdout"
+  err_file="$tmpdir/stderr"
+  meta_file="$tmpdir/meta"
+
+  if guest_probe "$vmid" "$cmd" "$out_file" "$err_file" "$meta_file"; then
+    module2_ok "$label"
+  else
+    module2_fail "$label" "$reason" "$hint"
+    print_file_block "STDOUT" "$out_file"
+    print_file_block "STDERR" "$err_file"
+  fi
+
+  rm -rf "$tmpdir"
+}
+
+show_module2_prereq() {
+  if [[ "$INVENTORY_LOADED" -ne 1 ]]; then
+    load_inventory
+  fi
+
+  echo
+  echo "============================================================"
+  echo "MODULE 2 PREREQ CHECK SUMMARY"
+  echo "============================="
+  echo
+
+  module2_failed=0
+
+  if show_module1_status; then
+    module2_ok "Module 1 check passed"
+  else
+    module2_fail "Module 1 check passed" "Module 1 check failed" "run: bash run.sh check module1"
+  fi
+
+  module2_agent_check "HQ-SRV reachable" "$HQ_SRV_VMID"
+  module2_agent_check "BR-SRV reachable" "$BR_SRV_VMID"
+  module2_agent_check "HQ-CLI reachable" "$HQ_CLI_VMID"
+  module2_agent_check "HQ-RTR reachable" "$HQ_RTR_VMID"
+  module2_agent_check "BR-RTR reachable" "$BR_RTR_VMID"
+
+  module2_guest_check "DNS hq-srv/web/docker works" "$HQ_SRV_VMID" \
+    "test \"\$(dig +short @127.0.0.1 hq-srv.${DOMAIN})\" = 192.168.100.2 && test \"\$(dig +short @127.0.0.1 web.${DOMAIN})\" = 172.16.1.1 && test \"\$(dig +short @127.0.0.1 docker.${DOMAIN})\" = 172.16.2.1" \
+    "DNS records do not match expected Module 1 values" \
+    "check named-direct and zone files on HQ-SRV"
+
+  module2_guest_check "SSH 2026 listens on HQ-SRV" "$HQ_SRV_VMID" \
+    "ss -tulpen | grep -q ':2026'" \
+    "sshd is not listening on port 2026 on HQ-SRV" \
+    "check systemctl status sshd --no-pager"
+
+  module2_guest_check "SSH 2026 listens on BR-SRV" "$BR_SRV_VMID" \
+    "ss -tulpen | grep -q ':2026'" \
+    "sshd is not listening on port 2026 on BR-SRV" \
+    "check systemctl status sshd --no-pager"
+
+  echo
+  if [[ "$module2_failed" -eq 0 ]]; then
+    echo "RESULT: MODULE 2 PREREQ PASSED"
+  else
+    echo "RESULT: MODULE 2 PREREQ FAILED"
+    return 1
+  fi
+}
+
+print_module2_plan() {
+  cat <<EOF
+
+============================================================
+MODULE 2 PLANNED STEPS
+======================
+
+[PLAN] 00-prereq.sh
+  Verify Module 1 baseline, DNS, qemu-guest-agent, and SSH 2026.
+[PLAN] 01-hq-srv-storage.sh
+  RAID ${RAID_LEVEL:-0} on HQ-SRV, ${RAID_MOUNT:-/raid}, NFS ${NFS_DIR:-/raid/nfs}, HQ-CLI automount ${NFS_CLIENT_MOUNT:-/mnt/nfs}.
+[PLAN] 02-br-srv-domain.sh
+  Samba DC on BR-SRV for ${DOMAIN:-au-team.irpo}/${REALM:-AU-TEAM.IRPO}, HQ users, group ${HQ_GROUP:-hq}, HQ-CLI domain join.
+[PLAN] 03-time-ansible.sh
+  Chrony via ${TIME_SERVER:-isp.au-team.irpo}, Ansible on BR-SRV, report ${ANSIBLE_REPORT_DIR:-/etc/ansible/PC-INFO}.
+[PLAN] 04-web-docker.sh
+  Docker app on BR-SRV port ${APP_PORT:-8080}, Apache/MariaDB on HQ-SRV with DB ${WEB_DB_NAME:-webdb}.
+[PLAN] 05-proxy-dnat.sh
+  DNAT on routers, ISP reverse proxy for web.${DOMAIN:-au-team.irpo} and docker.${DOMAIN:-au-team.irpo}.
+[PLAN] 06-security-firewall.sh
+  Basic auth, CA/HTTPS, protected tunnel, router firewalls.
+[PLAN] 07-logging-monitoring-backup.sh
+  CUPS PDF, rsyslog, monitoring ${MON_DOMAIN:-mon.au-team.irpo}, HQ-SRV backup ${BACKUP_DIR:-/backup}.
+
+No heavy services are configured by demo module2 yet.
+EOF
+}
+
+demo_module2() {
+  if [[ "$INVENTORY_LOADED" -ne 1 ]]; then
+    ensure_demo_inventory
+    load_inventory
+  fi
+
+  echo "============================================================"
+  echo "MODULE 2 DEMO SCAFFOLD"
+  echo "============================================================"
+  echo "This mode checks prereq only and prints the planned steps."
+
+  if ! show_module2_prereq; then
+    echo "RESULT: MODULE 2 DEMO BLOCKED"
+    return 1
+  fi
+
+  print_module2_plan
+  echo
+  echo "RESULT: MODULE 2 DEMO READY"
+}
+
 main() {
   need_root
   case "${1:-}" in
     check)
-      if [[ "${2:-}" == "module1" ]]; then
-        show_module1_status
-      else
-        check_all
-      fi
+      case "${2:-}" in
+        module1)
+          show_module1_status
+          ;;
+        module2)
+          show_module2_prereq
+          ;;
+        *)
+          check_all
+          ;;
+      esac
       ;;
     list)
       qm list
@@ -687,6 +850,20 @@ main() {
       case "${2:-}" in
         module1)
           demo_module1
+          ;;
+        module2)
+          demo_module2
+          ;;
+        *)
+          usage
+          exit 1
+          ;;
+      esac
+      ;;
+    prereq)
+      case "${2:-}" in
+        module2)
+          show_module2_prereq
           ;;
         *)
           usage
