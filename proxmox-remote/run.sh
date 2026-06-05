@@ -556,14 +556,19 @@ show_module1_status() {
     "check ip route, nft list ruleset, and ISP WAN DHCP"
 
   module_check_item "HQ-RTR GRE tunnel" "$HQ_RTR_VMID" \
-    "ip tunnel show gre1 | grep -q 'remote 172.16.2.2' && ping -c 4 10.10.10.2 >/dev/null" \
+    "ip tunnel show gre1 | grep -q \"remote $BR_RTR_WAN_ADDR\" && ping -c 4 10.10.10.2 >/dev/null" \
     "gre1 is missing or 10.10.10.2 is unreachable" \
     "check systemctl status gre1-demo --no-pager and ip tunnel show gre1"
 
   module_check_item "BR-RTR GRE tunnel" "$BR_RTR_VMID" \
-    "ip tunnel show gre1 | grep -q 'remote 172.16.1.2' && ping -c 4 10.10.10.1 >/dev/null" \
+    "ip tunnel show gre1 | grep -q \"remote $HQ_RTR_WAN_ADDR\" && ping -c 4 10.10.10.1 >/dev/null" \
     "gre1 is missing or 10.10.10.1 is unreachable" \
     "check systemctl status gre1-demo --no-pager and ip tunnel show gre1"
+
+  module_check_item "HQ-RTR VLAN $VLAN_SRV/$VLAN_CLI/$VLAN_MGMT interfaces" "$HQ_RTR_VMID" \
+    "ip -br a | grep -q \"$HQ_RTR_LAN_IF.$VLAN_SRV\" && ip -br a | grep -q \"$HQ_RTR_LAN_IF.$VLAN_CLI\" && ip -br a | grep -q \"$HQ_RTR_LAN_IF.$VLAN_MGMT\"" \
+    "HQ-RTR VLAN interfaces are missing" \
+    "check /etc/net/ifaces/$HQ_RTR_LAN_IF.$VLAN_SRV and systemctl restart network"
 
   module_check_item "OSPF neighbor Full on HQ-RTR" "$HQ_RTR_VMID" \
     "vtysh -c 'show ip ospf neighbor' | grep -q Full" \
@@ -576,34 +581,44 @@ show_module1_status() {
     "check vtysh -c 'show ip ospf neighbor' and journalctl -u frr --no-pager -n 80"
 
   module_check_item "DNS service on HQ-SRV" "$HQ_SRV_VMID" \
-    "systemctl is-active --quiet named-direct && ss -tulpen | grep -q ':53' && dig +short @127.0.0.1 hq-srv.au-team.irpo | grep -qx 192.168.100.2 && dig +short @192.168.100.2 hq-srv.au-team.irpo | grep -qx 192.168.100.2" \
+    "systemctl is-active --quiet named-direct && ss -tulpen | grep -q ':53' && dig +short @127.0.0.1 hq-srv.$DOMAIN | grep -qx $HQ_SRV_ADDR && dig +short @$HQ_SRV_ADDR hq-srv.$DOMAIN | grep -qx $HQ_SRV_ADDR" \
     "named-direct.service inactive or DNS port/queries failed" \
     "check journalctl -u named-direct --no-pager -n 80"
 
   module_check_item "DNS records hq-srv/web/docker" "$HQ_SRV_VMID" \
-    "test \"\$(dig +short @127.0.0.1 hq-srv.au-team.irpo)\" = 192.168.100.2 && test \"\$(dig +short @127.0.0.1 web.au-team.irpo)\" = 172.16.1.1 && test \"\$(dig +short @127.0.0.1 docker.au-team.irpo)\" = 172.16.2.1" \
+    "test \"\$(dig +short @127.0.0.1 hq-srv.$DOMAIN)\" = $HQ_SRV_ADDR && test \"\$(dig +short @127.0.0.1 web.$DOMAIN)\" = $DNS_WEB_IP && test \"\$(dig +short @127.0.0.1 docker.$DOMAIN)\" = $DNS_DOCKER_IP" \
     "DNS records hq-srv/web/docker do not match expected addresses" \
     "check /var/lib/bind/etc/zones/au-team.irpo.zone and named-checkconf -t /var/lib/bind /etc/named-direct.conf"
 
+  module_check_item "SSH $SSH_PORT listens on HQ-SRV" "$HQ_SRV_VMID" \
+    "ss -tulpen | grep -q ':$SSH_PORT'" \
+    "sshd is not listening on port $SSH_PORT on HQ-SRV" \
+    "check systemctl status sshd --no-pager"
+
+  module_check_item "SSH $SSH_PORT listens on BR-SRV" "$BR_SRV_VMID" \
+    "ss -tulpen | grep -q ':$SSH_PORT'" \
+    "sshd is not listening on port $SSH_PORT on BR-SRV" \
+    "check systemctl status sshd --no-pager"
+
   module_check_item "HQ-SRV -> BR-SRV ping" "$HQ_SRV_VMID" \
-    "ping -c 4 192.168.10.2 >/dev/null" \
+    "ping -c 4 $BR_SRV_ADDR >/dev/null" \
     "HQ-SRV cannot reach BR-SRV" \
     "check OSPF routes and BR-SRV gateway"
 
   module_check_item "HQ-CLI -> BR-SRV ping" "$HQ_CLI_VMID" \
-    "ping -c 4 192.168.10.2 >/dev/null" \
+    "ping -c 4 $BR_SRV_ADDR >/dev/null" \
     "HQ-CLI cannot reach BR-SRV" \
     "check DHCP lease, default route, and OSPF routes"
 
   module_check_item "BR-SRV -> HQ-SRV ping" "$BR_SRV_VMID" \
-    "ping -c 4 192.168.100.2 >/dev/null" \
+    "ping -c 4 $HQ_SRV_ADDR >/dev/null" \
     "BR-SRV cannot reach HQ-SRV" \
     "check BR-SRV gateway and OSPF routes"
 
   module_check_item "BR-SRV -> HQ-CLI ping" "$BR_SRV_VMID" \
-    "ping -c 4 192.168.200.11 >/dev/null || ping -c 4 192.168.200.10 >/dev/null" \
-    "BR-SRV cannot reach HQ-CLI on 192.168.200.11 or 192.168.200.10" \
-    "check HQ-CLI DHCP lease and OSPF route to 192.168.200.0/27"
+    "ping -c 4 $HQ_CLI_EXPECTED_IP >/dev/null || ping -c 4 $HQ_CLI_DHCP_START >/dev/null" \
+    "BR-SRV cannot reach HQ-CLI on $HQ_CLI_EXPECTED_IP or $HQ_CLI_DHCP_START" \
+    "check HQ-CLI DHCP lease and OSPF route to $HQ_CLI_NET"
 
   echo
   if [[ "$module_check_failed" -eq 0 ]]; then
@@ -648,8 +663,8 @@ prepare_vlans() {
   echo "============================================================"
   echo "PREPARE PROXMOX VLAN TAGS"
   echo "============================================================"
-  set_vm_net_tag "hq-srv" "$HQ_SRV_VMID" "$HQ_SRV_PVE_NET" 100 "vmbr1003"
-  set_vm_net_tag "hq-cli" "$HQ_CLI_VMID" "$HQ_CLI_PVE_NET" 200 "vmbr1003"
+  set_vm_net_tag "hq-srv" "$HQ_SRV_VMID" "$HQ_SRV_PVE_NET" "$VLAN_SRV" "vmbr1003"
+  set_vm_net_tag "hq-cli" "$HQ_CLI_VMID" "$HQ_CLI_PVE_NET" "$VLAN_CLI" "vmbr1003"
 }
 
 ensure_demo_inventory() {
@@ -849,18 +864,18 @@ show_module2_prereq() {
   module2_agent_check "BR-RTR reachable" "$BR_RTR_VMID"
 
   module2_guest_check "DNS hq-srv/web/docker works" "$HQ_SRV_VMID" \
-    "test \"\$(dig +short @127.0.0.1 hq-srv.${DOMAIN})\" = 192.168.100.2 && test \"\$(dig +short @127.0.0.1 web.${DOMAIN})\" = 172.16.1.1 && test \"\$(dig +short @127.0.0.1 docker.${DOMAIN})\" = 172.16.2.1" \
+    "test \"\$(dig +short @127.0.0.1 hq-srv.${DOMAIN})\" = $HQ_SRV_ADDR && test \"\$(dig +short @127.0.0.1 web.${DOMAIN})\" = $DNS_WEB_IP && test \"\$(dig +short @127.0.0.1 docker.${DOMAIN})\" = $DNS_DOCKER_IP" \
     "DNS records do not match expected Module 1 values" \
     "check named-direct and zone files on HQ-SRV"
 
-  module2_guest_check "SSH 2026 listens on HQ-SRV" "$HQ_SRV_VMID" \
-    "ss -tulpen | grep -q ':2026'" \
-    "sshd is not listening on port 2026 on HQ-SRV" \
+  module2_guest_check "SSH $SSH_PORT listens on HQ-SRV" "$HQ_SRV_VMID" \
+    "ss -tulpen | grep -q ':$SSH_PORT'" \
+    "sshd is not listening on port $SSH_PORT on HQ-SRV" \
     "check systemctl status sshd --no-pager"
 
-  module2_guest_check "SSH 2026 listens on BR-SRV" "$BR_SRV_VMID" \
-    "ss -tulpen | grep -q ':2026'" \
-    "sshd is not listening on port 2026 on BR-SRV" \
+  module2_guest_check "SSH $SSH_PORT listens on BR-SRV" "$BR_SRV_VMID" \
+    "ss -tulpen | grep -q ':$SSH_PORT'" \
+    "sshd is not listening on port $SSH_PORT on BR-SRV" \
     "check systemctl status sshd --no-pager"
 
   echo
@@ -880,19 +895,19 @@ MODULE 2 PLANNED STEPS
 ======================
 
 [PLAN] 00-prereq.sh
-  Verify Module 1 baseline, DNS, qemu-guest-agent, and SSH 2026.
+  Verify Module 1 baseline, DNS, qemu-guest-agent, VLANs $VLAN_SRV/$VLAN_CLI/$VLAN_MGMT, and SSH $SSH_PORT.
 [PLAN] 01-hq-srv-storage.sh
-  RAID${RAID_LEVEL:-5} from ${RAID_DISK_COUNT:-3} x ${RAID_DISK_SIZE_GB:-1}GB disks on HQ-SRV, ${RAID_DEVICE:-/dev/md0}, mount ${RAID_MOUNT:-/raid5}, NFS ${NFS_DIR:-/raid5/nfs}, HQ-CLI automount ${NFS_CLIENT_MOUNT:-/mnt/nfs}.
+  RAID${RAID_LEVEL:-5} from ${RAID_DISK_COUNT:-3} x ${RAID_DISK_SIZE_GB:-1}GB disks on HQ-SRV, ${RAID_DEVICE:-/dev/md3}, mdadm.conf, ext4, mount ${RAID_MOUNT:-/raid}, NFS ${NFS_DIR:-/raid/nfs}, HQ-CLI automount ${NFS_CLIENT_MOUNT:-/mnt/nfs}.
 [PLAN] 02-br-srv-domain.sh
-  Samba DC on BR-SRV for ${DOMAIN:-au-team.irpo}/${REALM:-AU-TEAM.IRPO}, users ${DOMAIN_USER_TEMPLATE:-user{N}hq}, group ${HQ_GROUP:-hq}, import ${USERS_CSV_PATH:-/opt/users.csv}, HQ-CLI domain join.
+  Samba DC on BR-SRV for ${DOMAIN:-au-team.irpo}/${REALM:-AU-TEAM.IRPO}, users ${DOMAIN_USERS_PREFIX:-hquser}1-${DOMAIN_USERS_PREFIX:-hquser}${DOMAIN_USERS_COUNT:-5}, group ${DOMAIN_GROUP:-hq}, sudo only cat/grep/id, HQ-CLI domain join.
 [PLAN] 03-time-ansible.sh
-  Chrony server selected by NTP_SERVER_ROLE=${NTP_SERVER_ROLE:-inventory-select} from ${NTP_SERVER_CANDIDATES:-isp,hq-rtr}, Ansible on BR-SRV, report ${ANSIBLE_REPORT_DIR:-/etc/ansible/PC-INFO}, install ${HQ_CLI_BROWSER:-Yandex Browser} on HQ-CLI.
+  Chrony server role ${NTP_SERVER_ROLE:-ISP}, stratum ${NTP_STRATUM:-8}, clients HQ-SRV/HQ-CLI/BR-RTR/BR-SRV; Ansible on BR-SRV in ${ANSIBLE_WORKDIR:-/etc/ansible}, ansible all -m ping; optional ${HQ_CLI_BROWSER:-Yandex Browser} on HQ-CLI.
 [PLAN] 04-web-docker.sh
-  MediaWiki + MariaDB on BR-SRV using ${WIKI_COMPOSE_FILE:-wiki.yml}, services ${WIKI_SERVICE:-wiki}/${WIKI_DB_SERVICE:-mariadb}, DB ${APP_DB_NAME:-mediawiki}, user ${APP_DB_USER:-wiki}, port ${APP_PORT:-8080}; Moodle on HQ-SRV with DB ${MOODLE_DB_NAME:-moodledb}, user ${MOODLE_DB_USER:-moodle}.
+  Docker on BR-SRV: images ${DOCKER_IMAGE_APP:-site_latest}/${DOCKER_IMAGE_DB:-postgresql_latest}, containers ${DOCKER_APP_CONTAINER:-site}/${DOCKER_DB_CONTAINER:-db}, DB ${DOCKER_DB_NAME:-testdb3}, user ${DOCKER_DB_USER:-test3c}, port ${DOCKER_APP_PORT:-8083}; Apache + MariaDB on HQ-SRV: DB ${WEB_DB_NAME:-webdb}, user ${WEB_DB_USER:-web3}, import dump.sql, copy index.php/images.
 [PLAN] 05-proxy-dnat.sh
-  DNAT port ${DNAT_PORT:-2024}: HQ-RTR -> ${DNAT_HQ_TARGET:-192.168.100.2:2024}, BR-RTR -> ${DNAT_BR_TARGET:-192.168.10.2:2024}; nginx reverse proxy on ${REVERSE_PROXY_HOST:-hq-rtr.au-team.irpo} for ${MOODLE_DOMAIN:-moodle.au-team.irpo} and ${WIKI_DOMAIN:-wiki.au-team.irpo}.
+  DNAT ${DOCKER_APP_PORT:-8083}: HQ-RTR -> HQ-SRV web, BR-RTR -> BR-SRV docker; DNAT ${SSH_PORT:-2013}: HQ-RTR -> HQ-SRV SSH, BR-RTR -> BR-SRV SSH; nginx reverse proxy on ISP: ${WEB_DOMAIN:-web.au-team.irpo} -> HQ-SRV web, ${DOCKER_DOMAIN:-docker.au-team.irpo} -> BR-SRV site.
 [PLAN] 06-security-firewall.sh
-  Basic auth, CA/HTTPS, protected tunnel, router firewalls.
+  Basic auth on ISP for ${WEB_DOMAIN:-web.au-team.irpo}: ${BASIC_AUTH_USER:-Kazimirc}, file ${BASIC_AUTH_FILE:-/etc/nginx/.htpasswd}; firewall rules after DNAT/proxy are confirmed.
 [PLAN] 07-logging-monitoring-backup.sh
   CUPS PDF, rsyslog, monitoring ${MON_DOMAIN:-mon.au-team.irpo}, HQ-SRV backup ${BACKUP_DIR:-/backup}.
 

@@ -1,15 +1,19 @@
 hostnamectl set-hostname HQ-RTR
 
+cidr_ip() {
+  printf '%s\n' "${1%%/*}"
+}
+
 write_eth_static "$HQ_RTR_WAN_IF" "$HQ_RTR_WAN_IP" "$HQ_RTR_WAN_GW"
 cat > "/etc/net/ifaces/$HQ_RTR_WAN_IF/resolv.conf" <<EOFINNER
+nameserver $DNS_FORWARDER_1
+nameserver $DNS_FORWARDER_2
 nameserver 8.8.8.8
-nameserver 1.1.1.1
-nameserver 77.88.8.8
 EOFINNER
 cat > /etc/resolv.conf <<EOFINNER
+nameserver $DNS_FORWARDER_1
+nameserver $DNS_FORWARDER_2
 nameserver 8.8.8.8
-nameserver 1.1.1.1
-nameserver 77.88.8.8
 EOFINNER
 restart_network_safe
 ip -br a || true
@@ -19,11 +23,11 @@ ping -c 4 "$HQ_RTR_WAN_GW" || true
 safe_apt_install nftables sudo dhcp-server frr tzdata
 timedatectl set-timezone "$TZ"
 
-id "$NET_ADMIN_USER" >/dev/null 2>&1 || useradd -m -s /bin/bash "$NET_ADMIN_USER"
-echo "$NET_ADMIN_USER:$DEMO_PASS" | chpasswd
+id "$ROUTER_ADMIN_USER" >/dev/null 2>&1 || useradd -m -s /bin/bash "$ROUTER_ADMIN_USER"
+echo "$ROUTER_ADMIN_USER:$ROUTER_ADMIN_PASS" | chpasswd
 mkdir -p /etc/sudoers.d
-echo "$NET_ADMIN_USER ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/$NET_ADMIN_USER"
-chmod 440 "/etc/sudoers.d/$NET_ADMIN_USER"
+echo "$ROUTER_ADMIN_USER ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/$ROUTER_ADMIN_USER"
+chmod 440 "/etc/sudoers.d/$ROUTER_ADMIN_USER"
 
 ensure_iface_dir "$HQ_RTR_LAN_IF"
 cat > "/etc/net/ifaces/$HQ_RTR_LAN_IF/options" <<EOFINNER
@@ -31,32 +35,32 @@ TYPE=eth
 EOFINNER
 rm -f "/etc/net/ifaces/$HQ_RTR_LAN_IF/ipv4address" "/etc/net/ifaces/$HQ_RTR_LAN_IF/ipv4route"
 
-for vid in 100 200 999; do
+for vid in "$VLAN_SRV" "$VLAN_CLI" "$VLAN_MGMT"; do
   ensure_iface_dir "$HQ_RTR_LAN_IF.$vid"
 done
 
-cat > "/etc/net/ifaces/$HQ_RTR_LAN_IF.100/options" <<EOFINNER
+cat > "/etc/net/ifaces/$HQ_RTR_LAN_IF.$VLAN_SRV/options" <<EOFINNER
 TYPE=vlan
 HOST=$HQ_RTR_LAN_IF
-VID=100
+VID=$VLAN_SRV
 BOOTPROTO=static
 EOFINNER
-cat > "/etc/net/ifaces/$HQ_RTR_LAN_IF.200/options" <<EOFINNER
+cat > "/etc/net/ifaces/$HQ_RTR_LAN_IF.$VLAN_CLI/options" <<EOFINNER
 TYPE=vlan
 HOST=$HQ_RTR_LAN_IF
-VID=200
+VID=$VLAN_CLI
 BOOTPROTO=static
 EOFINNER
-cat > "/etc/net/ifaces/$HQ_RTR_LAN_IF.999/options" <<EOFINNER
+cat > "/etc/net/ifaces/$HQ_RTR_LAN_IF.$VLAN_MGMT/options" <<EOFINNER
 TYPE=vlan
 HOST=$HQ_RTR_LAN_IF
-VID=999
+VID=$VLAN_MGMT
 BOOTPROTO=static
 EOFINNER
 
-echo "$HQ_RTR_VLAN100_IP" > "/etc/net/ifaces/$HQ_RTR_LAN_IF.100/ipv4address"
-echo "$HQ_RTR_VLAN200_IP" > "/etc/net/ifaces/$HQ_RTR_LAN_IF.200/ipv4address"
-echo "$HQ_RTR_VLAN999_IP" > "/etc/net/ifaces/$HQ_RTR_LAN_IF.999/ipv4address"
+echo "$HQ_RTR_SRV_GW" > "/etc/net/ifaces/$HQ_RTR_LAN_IF.$VLAN_SRV/ipv4address"
+echo "$HQ_RTR_CLI_GW" > "/etc/net/ifaces/$HQ_RTR_LAN_IF.$VLAN_CLI/ipv4address"
+echo "$HQ_RTR_MGMT_GW" > "/etc/net/ifaces/$HQ_RTR_LAN_IF.$VLAN_MGMT/ipv4address"
 
 enable_ip_forward
 
@@ -77,21 +81,21 @@ mkdir -p /etc/dhcp /etc/sysconfig
 cat > /etc/dhcp/dhcpd.conf <<EOFINNER
 authoritative;
 option domain-name "$DOMAIN";
-option domain-name-servers 192.168.100.2;
+option domain-name-servers $HQ_SRV_ADDR;
 default-lease-time 600;
 max-lease-time 7200;
 
-subnet 192.168.200.0 netmask 255.255.255.224 {
-  range 192.168.200.10 192.168.200.30;
-  option routers 192.168.200.1;
+subnet ${HQ_CLI_NET%/*} netmask 255.255.255.224 {
+  range $HQ_CLI_DHCP_START $HQ_CLI_DHCP_END;
+  option routers $HQ_RTR_CLI_ADDR;
   option domain-name "$DOMAIN";
-  option domain-name-servers 192.168.100.2;
+  option domain-name-servers $HQ_SRV_ADDR;
 }
 EOFINNER
 cat > /etc/sysconfig/dhcpd <<EOFINNER
-DHCPDARGS="$HQ_RTR_LAN_IF.200"
-INTERFACES="$HQ_RTR_LAN_IF.200"
-DHCPD_IFACE="$HQ_RTR_LAN_IF.200"
+DHCPDARGS="$HQ_RTR_LAN_IF.$VLAN_CLI"
+INTERFACES="$HQ_RTR_LAN_IF.$VLAN_CLI"
+DHCPD_IFACE="$HQ_RTR_LAN_IF.$VLAN_CLI"
 EOFINNER
 
 mkdir -p /etc/frr
@@ -112,9 +116,9 @@ interface gre1
 router ospf
  ospf router-id 1.1.1.1
  network 10.10.10.0/30 area 0
- network 192.168.100.0/27 area 0
- network 192.168.200.0/27 area 0
- network 192.168.99.0/29 area 0
+ network $HQ_SRV_NET area 0
+ network $HQ_CLI_NET area 0
+ network $MGMT_NET area 0
 EOFINNER
 chown frr:frr /etc/frr/frr.conf /etc/frr/daemons 2>/dev/null || true
 chmod 640 /etc/frr/frr.conf 2>/dev/null || true
@@ -129,7 +133,7 @@ Type=oneshot
 RemainAfterExit=yes
 ExecStartPre=/bin/sh -c 'ip link set gre1 down 2>/dev/null || true'
 ExecStartPre=/bin/sh -c 'ip tunnel del gre1 2>/dev/null || true'
-ExecStart=/bin/sh -c 'ip tunnel add gre1 mode gre local 172.16.1.2 remote 172.16.2.2 ttl 255'
+ExecStart=/bin/sh -c 'ip tunnel add gre1 mode gre local $HQ_RTR_WAN_ADDR remote $BR_RTR_WAN_ADDR ttl 255'
 ExecStart=/bin/sh -c 'ip addr add 10.10.10.1/30 dev gre1'
 ExecStart=/bin/sh -c 'ip link set gre1 up multicast on'
 ExecStart=/bin/sh -c 'ip route replace 10.10.10.0/30 dev gre1'

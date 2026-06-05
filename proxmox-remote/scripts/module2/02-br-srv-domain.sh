@@ -13,9 +13,9 @@ fi
 
 echo "Planned Module 2 Samba domain actions for BR-SRV/HQ-CLI"
 echo "- Prepare Samba DC for ${DOMAIN:-au-team.irpo} / ${REALM:-AU-TEAM.IRPO}."
-echo "- Create/import users named ${DOMAIN_USER_TEMPLATE:-user{N}hq}; expected CSV on BR-SRV: ${USERS_CSV_PATH:-/opt/users.csv}."
-echo "- Add domain users to group ${HQ_GROUP:-hq}."
-echo "- Limit sudo for ${HQ_GROUP:-hq} to ${SUDO_LIMITED_COMMANDS:-cat,grep,id}."
+echo "- Create/import users named ${DOMAIN_USERS_PREFIX:-hquser}1-${DOMAIN_USERS_PREFIX:-hquser}${DOMAIN_USERS_COUNT:-5}; expected CSV on BR-SRV: ${USERS_CSV_PATH:-/opt/users.csv}."
+echo "- Add domain users to group ${DOMAIN_GROUP:-hq}."
+echo "- Limit sudo for ${DOMAIN_GROUP:-hq} to ${SUDO_LIMITED_COMMANDS:-cat,grep,id}."
 echo "- Join HQ-CLI to the domain after prereq checks pass."
 echo "- Validate users.csv schema before import; do not assume column order."
 echo "Read-only local checks:"

@@ -12,11 +12,12 @@ if [[ -f /tmp/de-run/scripts/lib/common.sh ]]; then
 fi
 
 echo "Planned Module 2 web/Docker actions"
-echo "- BR-SRV Docker Compose file ${WIKI_COMPOSE_FILE:-wiki.yml} with services ${WIKI_SERVICE:-wiki} and ${WIKI_DB_SERVICE:-mariadb}."
-echo "- MediaWiki database ${APP_DB_NAME:-mediawiki}, user ${APP_DB_USER:-wiki}, password from APP_DB_PASS, external port ${APP_PORT:-8080}."
-echo "- HQ-SRV Moodle with Apache + MariaDB, database ${MOODLE_DB_NAME:-moodledb}, user ${MOODLE_DB_USER:-moodle}, admin password from MOODLE_ADMIN_PASS."
-echo "- Publish ${WIKI_DOMAIN:-wiki.au-team.irpo} and ${MOODLE_DOMAIN:-moodle.au-team.irpo} only after reverse proxy step."
+echo "- BR-SRV Docker app from images ${DOCKER_IMAGE_APP:-site_latest} and ${DOCKER_IMAGE_DB:-postgresql_latest}."
+echo "- Containers ${DOCKER_APP_CONTAINER:-site}/${DOCKER_DB_CONTAINER:-db}, DB ${DOCKER_DB_NAME:-testdb3}, user ${DOCKER_DB_USER:-test3c}, password from DOCKER_DB_PASS, external port ${DOCKER_APP_PORT:-8083}."
+echo "- HQ-SRV Apache + MariaDB, database ${WEB_DB_NAME:-webdb}, user ${WEB_DB_USER:-web3}, password from WEB_DB_PASS."
+echo "- Import dump.sql and copy index.php/images only after source paths are confirmed."
+echo "- Publish ${WEB_DOMAIN:-web.au-team.irpo} and ${DOCKER_DOMAIN:-docker.au-team.irpo} only after reverse proxy step."
 echo "Read-only local checks:"
-ss -tulpen | grep -E ":(${APP_PORT:-8080}|80|443)" || true
+ss -tulpen | grep -E ":(${DOCKER_APP_PORT:-8083}|80|443)" || true
 command -v docker || true
-echo "TODO: no Docker, MediaWiki, Moodle, Apache, or MariaDB changes in scaffold mode."
+echo "TODO: no Docker, Apache, or MariaDB changes in scaffold mode."

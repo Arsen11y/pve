@@ -13,6 +13,6 @@ timedatectl set-timezone "$TZ"
 ip -br a || true
 ip route || true
 cat /etc/resolv.conf || true
-ping -c 4 192.168.200.1 || true
-ping -c 4 192.168.10.2 || true
-nslookup hq-srv.au-team.irpo 192.168.100.2 || true
+ping -c 4 "$HQ_RTR_CLI_ADDR" || true
+ping -c 4 "$BR_SRV_ADDR" || true
+nslookup "hq-srv.$DOMAIN" "$HQ_SRV_ADDR" || true

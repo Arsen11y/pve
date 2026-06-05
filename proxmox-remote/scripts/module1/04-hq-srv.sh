@@ -1,24 +1,39 @@
 hostnamectl set-hostname HQ-SRV
 
+reverse_zone_from_net() {
+  local cidr="$1"
+  local ip="${cidr%/*}"
+  local a b c d
+  IFS=. read -r a b c d <<EOFINNER
+$ip
+EOFINNER
+  printf '%s.%s.%s.in-addr.arpa\n' "$c" "$b" "$a"
+}
+
+last_octet() {
+  local ip="${1%/*}"
+  printf '%s\n' "${ip##*.}"
+}
+
 write_eth_static "$HQ_SRV_IF" "$HQ_SRV_IP" "$HQ_SRV_GW"
 cat > "/etc/net/ifaces/$HQ_SRV_IF/resolv.conf" <<EOFINNER
+nameserver $DNS_FORWARDER_1
+nameserver $DNS_FORWARDER_2
 nameserver 8.8.8.8
-nameserver 1.1.1.1
-nameserver 77.88.8.8
 EOFINNER
 restart_network_safe
 cat > /etc/resolv.conf <<EOFINNER
+nameserver $DNS_FORWARDER_1
+nameserver $DNS_FORWARDER_2
 nameserver 8.8.8.8
-nameserver 1.1.1.1
-nameserver 77.88.8.8
 EOFINNER
 
 apt-get update
 apt-get install -y bind bind-utils sudo openssh-server tzdata
 timedatectl set-timezone "$TZ"
 
-id "$SSH_USER" >/dev/null 2>&1 || useradd -m -u 2026 -s /bin/bash "$SSH_USER"
-echo "$SSH_USER:$DEMO_PASS" | chpasswd
+id "$SSH_USER" >/dev/null 2>&1 || useradd -m -u "$SSH_UID" -s /bin/bash "$SSH_USER"
+echo "$SSH_USER:$SSH_PASS" | chpasswd
 
 mkdir -p /etc/sudoers.d /etc/ssh
 echo "$SSH_USER ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/$SSH_USER"
@@ -31,7 +46,7 @@ sed -i '/^# BEGIN DEMO SSH$/,/^# END DEMO SSH$/d' "$SSHD_CONF"
 cat >> "$SSHD_CONF" <<EOFINNER
 
 # BEGIN DEMO SSH
-Port 2026
+Port $SSH_PORT
 AllowUsers $SSH_USER
 MaxAuthTries 2
 Banner /etc/ssh/banner
@@ -43,8 +58,12 @@ systemctl restart sshd
 
 systemctl disable --now bind 2>/dev/null || true
 
+HQ_SRV_REV_ZONE="$(reverse_zone_from_net "$HQ_SRV_NET")"
+HQ_CLI_REV_ZONE="$(reverse_zone_from_net "$HQ_CLI_NET")"
+BR_SRV_REV_ZONE="$(reverse_zone_from_net "$BR_SRV_NET")"
+
 mkdir -p /var/lib/bind/etc/zones /var/lib/bind/run/named
-cat > /var/lib/bind/etc/named-direct.conf <<'EOFINNER'
+cat > /var/lib/bind/etc/named-direct.conf <<EOFINNER
 options {
     directory "/etc";
     pid-file "/run/named/named.pid";
@@ -53,72 +72,73 @@ options {
     allow-query { any; };
     recursion yes;
     allow-recursion { any; };
+    forwarders { $DNS_FORWARDER_1; $DNS_FORWARDER_2; };
     dnssec-validation no;
 };
 
-zone "au-team.irpo" {
+zone "$DOMAIN" {
     type master;
-    file "/etc/zones/au-team.irpo.zone";
+    file "/etc/zones/$DOMAIN.zone";
 };
 
-zone "100.168.192.in-addr.arpa" {
+zone "$HQ_SRV_REV_ZONE" {
     type master;
-    file "/etc/zones/100.168.192.zone";
+    file "/etc/zones/$HQ_SRV_REV_ZONE.zone";
 };
 
-zone "200.168.192.in-addr.arpa" {
+zone "$HQ_CLI_REV_ZONE" {
     type master;
-    file "/etc/zones/200.168.192.zone";
+    file "/etc/zones/$HQ_CLI_REV_ZONE.zone";
 };
 
-zone "10.168.192.in-addr.arpa" {
+zone "$BR_SRV_REV_ZONE" {
     type master;
-    file "/etc/zones/10.168.192.zone";
+    file "/etc/zones/$BR_SRV_REV_ZONE.zone";
 };
 EOFINNER
 
-cat > /var/lib/bind/etc/zones/au-team.irpo.zone <<'EOFINNER'
-$TTL 3600
-@       IN SOA  hq-srv.au-team.irpo. admin.au-team.irpo. (
-                2026060301 3600 900 604800 86400 )
-        IN NS   hq-srv.au-team.irpo.
+cat > "/var/lib/bind/etc/zones/$DOMAIN.zone" <<EOFINNER
+\$TTL 3600
+@       IN SOA  hq-srv.$DOMAIN. admin.$DOMAIN. (
+                2026060501 3600 900 604800 86400 )
+        IN NS   hq-srv.$DOMAIN.
 
-hq-srv  IN A    192.168.100.2
-hq-rtr  IN A    192.168.100.1
-hq-cli  IN A    192.168.200.11
-br-rtr  IN A    192.168.10.1
-br-srv  IN A    192.168.10.2
-web     IN A    172.16.1.1
-docker  IN A    172.16.2.1
+hq-srv  IN A    $HQ_SRV_ADDR
+hq-rtr  IN A    $HQ_RTR_SRV_ADDR
+hq-cli  IN A    $HQ_CLI_EXPECTED_IP
+br-rtr  IN A    $BR_RTR_LAN_ADDR
+br-srv  IN A    $BR_SRV_ADDR
+web     IN A    $DNS_WEB_IP
+docker  IN A    $DNS_DOCKER_IP
 EOFINNER
 
-cat > /var/lib/bind/etc/zones/100.168.192.zone <<'EOFINNER'
-$TTL 3600
-@       IN SOA  hq-srv.au-team.irpo. admin.au-team.irpo. (
-                2026060301 3600 900 604800 86400 )
-        IN NS   hq-srv.au-team.irpo.
+cat > "/var/lib/bind/etc/zones/$HQ_SRV_REV_ZONE.zone" <<EOFINNER
+\$TTL 3600
+@       IN SOA  hq-srv.$DOMAIN. admin.$DOMAIN. (
+                2026060501 3600 900 604800 86400 )
+        IN NS   hq-srv.$DOMAIN.
 
-1       IN PTR  hq-rtr.au-team.irpo.
-2       IN PTR  hq-srv.au-team.irpo.
+$(last_octet "$HQ_RTR_SRV_ADDR")       IN PTR  hq-rtr.$DOMAIN.
+$(last_octet "$HQ_SRV_ADDR")       IN PTR  hq-srv.$DOMAIN.
 EOFINNER
 
-cat > /var/lib/bind/etc/zones/200.168.192.zone <<'EOFINNER'
-$TTL 3600
-@       IN SOA  hq-srv.au-team.irpo. admin.au-team.irpo. (
-                2026060301 3600 900 604800 86400 )
-        IN NS   hq-srv.au-team.irpo.
+cat > "/var/lib/bind/etc/zones/$HQ_CLI_REV_ZONE.zone" <<EOFINNER
+\$TTL 3600
+@       IN SOA  hq-srv.$DOMAIN. admin.$DOMAIN. (
+                2026060501 3600 900 604800 86400 )
+        IN NS   hq-srv.$DOMAIN.
 
-11      IN PTR  hq-cli.au-team.irpo.
+$(last_octet "$HQ_CLI_EXPECTED_IP")      IN PTR  hq-cli.$DOMAIN.
 EOFINNER
 
-cat > /var/lib/bind/etc/zones/10.168.192.zone <<'EOFINNER'
-$TTL 3600
-@       IN SOA  hq-srv.au-team.irpo. admin.au-team.irpo. (
-                2026060301 3600 900 604800 86400 )
-        IN NS   hq-srv.au-team.irpo.
+cat > "/var/lib/bind/etc/zones/$BR_SRV_REV_ZONE.zone" <<EOFINNER
+\$TTL 3600
+@       IN SOA  hq-srv.$DOMAIN. admin.$DOMAIN. (
+                2026060501 3600 900 604800 86400 )
+        IN NS   hq-srv.$DOMAIN.
 
-1       IN PTR  br-rtr.au-team.irpo.
-2       IN PTR  br-srv.au-team.irpo.
+$(last_octet "$BR_RTR_LAN_ADDR")       IN PTR  br-rtr.$DOMAIN.
+$(last_octet "$BR_SRV_ADDR")       IN PTR  br-srv.$DOMAIN.
 EOFINNER
 
 chown -R named:named /var/lib/bind 2>/dev/null || true
@@ -144,11 +164,11 @@ systemctl restart named-direct.service
 
 cat > "/etc/net/ifaces/$HQ_SRV_IF/resolv.conf" <<EOFINNER
 search $DOMAIN
-nameserver 192.168.100.2
+nameserver $HQ_SRV_ADDR
 EOFINNER
 cat > /etc/resolv.conf <<EOFINNER
 search $DOMAIN
-nameserver 192.168.100.2
+nameserver $HQ_SRV_ADDR
 EOFINNER
 
 hostname || true
@@ -156,9 +176,9 @@ ip -br a || true
 ip route || true
 id "$SSH_USER" || true
 sudo -l -U "$SSH_USER" || true
-ss -tulpen | grep 2026 || true
+ss -tulpen | grep "$SSH_PORT" || true
 systemctl is-active named-direct || true
 ss -tulpen | grep ':53' || true
-dig +short @127.0.0.1 hq-srv.au-team.irpo || true
-dig +short @127.0.0.1 web.au-team.irpo || true
-dig +short @127.0.0.1 docker.au-team.irpo || true
+dig +short @127.0.0.1 "hq-srv.$DOMAIN" || true
+dig +short @127.0.0.1 "web.$DOMAIN" || true
+dig +short @127.0.0.1 "docker.$DOMAIN" || true

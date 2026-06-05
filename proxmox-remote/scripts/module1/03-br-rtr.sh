@@ -2,14 +2,14 @@ hostnamectl set-hostname BR-RTR
 
 write_eth_static "$BR_RTR_WAN_IF" "$BR_RTR_WAN_IP" "$BR_RTR_WAN_GW"
 cat > "/etc/net/ifaces/$BR_RTR_WAN_IF/resolv.conf" <<EOFINNER
+nameserver $DNS_FORWARDER_1
+nameserver $DNS_FORWARDER_2
 nameserver 8.8.8.8
-nameserver 1.1.1.1
-nameserver 77.88.8.8
 EOFINNER
 cat > /etc/resolv.conf <<EOFINNER
+nameserver $DNS_FORWARDER_1
+nameserver $DNS_FORWARDER_2
 nameserver 8.8.8.8
-nameserver 1.1.1.1
-nameserver 77.88.8.8
 EOFINNER
 restart_network_safe
 ip -br a || true
@@ -19,11 +19,11 @@ ping -c 4 "$BR_RTR_WAN_GW" || true
 safe_apt_install nftables sudo frr tzdata
 timedatectl set-timezone "$TZ"
 
-id "$NET_ADMIN_USER" >/dev/null 2>&1 || useradd -m -s /bin/bash "$NET_ADMIN_USER"
-echo "$NET_ADMIN_USER:$DEMO_PASS" | chpasswd
+id "$ROUTER_ADMIN_USER" >/dev/null 2>&1 || useradd -m -s /bin/bash "$ROUTER_ADMIN_USER"
+echo "$ROUTER_ADMIN_USER:$ROUTER_ADMIN_PASS" | chpasswd
 mkdir -p /etc/sudoers.d
-echo "$NET_ADMIN_USER ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/$NET_ADMIN_USER"
-chmod 440 "/etc/sudoers.d/$NET_ADMIN_USER"
+echo "$ROUTER_ADMIN_USER ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/$ROUTER_ADMIN_USER"
+chmod 440 "/etc/sudoers.d/$ROUTER_ADMIN_USER"
 
 write_eth_static "$BR_RTR_LAN_IF" "$BR_RTR_LAN_IP"
 
@@ -60,7 +60,7 @@ interface gre1
 router ospf
  ospf router-id 2.2.2.2
  network 10.10.10.0/30 area 0
- network 192.168.10.0/28 area 0
+ network $BR_SRV_NET area 0
 EOFINNER
 chown frr:frr /etc/frr/frr.conf /etc/frr/daemons 2>/dev/null || true
 chmod 640 /etc/frr/frr.conf 2>/dev/null || true
@@ -75,7 +75,7 @@ Type=oneshot
 RemainAfterExit=yes
 ExecStartPre=/bin/sh -c 'ip link set gre1 down 2>/dev/null || true'
 ExecStartPre=/bin/sh -c 'ip tunnel del gre1 2>/dev/null || true'
-ExecStart=/bin/sh -c 'ip tunnel add gre1 mode gre local 172.16.2.2 remote 172.16.1.2 ttl 255'
+ExecStart=/bin/sh -c 'ip tunnel add gre1 mode gre local $BR_RTR_WAN_ADDR remote $HQ_RTR_WAN_ADDR ttl 255'
 ExecStart=/bin/sh -c 'ip addr add 10.10.10.2/30 dev gre1'
 ExecStart=/bin/sh -c 'ip link set gre1 up multicast on'
 ExecStart=/bin/sh -c 'ip route replace 10.10.10.0/30 dev gre1'
