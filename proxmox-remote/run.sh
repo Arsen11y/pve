@@ -650,7 +650,168 @@ EOF
   guest_exec_pretty "$target" "$vmid" "RUN $label" "$cmd"
 }
 
+wait_guest_agent() {
+  local target="$1"
+  local vmid="$2"
+  local timeout="${3:-180}"
+  local waited=0
+  while (( waited < timeout )); do
+    if guest_ping "$vmid"; then
+      echo "[OK] qemu-guest-agent available on $target"
+      return 0
+    fi
+    sleep 5
+    waited=$((waited + 5))
+  done
+  echo "[FAIL] qemu-guest-agent timeout on $target"
+  echo "Command: qm agent $vmid ping"
+  return 1
+}
+
+rescan_guest_storage() {
+  local target="$1"
+  local vmid="$2"
+  guest_exec_pretty "$target" "$vmid" "RESCAN storage" \
+    'for h in /sys/class/scsi_host/host*; do echo "- - -" > "$h/scan" 2>/dev/null || true; done; udevadm settle 2>/dev/null || true; lsblk' 1
+}
+
+ensure_hq_srv_raid_disks() {
+  local vmid="${HQ_SRV_VMID:?HQ_SRV_VMID is empty}"
+  local slot
+  local tmpdir out_file err_file meta_file
+
+  echo "[STEP] ensure HQ-SRV RAID disks"
+  require_vm hq-srv "$vmid"
+  for slot in scsi1 scsi2 scsi3; do
+    if qm config "$vmid" | grep -q "^${slot}:"; then
+      echo "[OK] HQ-SRV $slot already exists"
+    else
+      echo "[STEP] add HQ-SRV $slot local-lvm:1"
+      qm set "$vmid" "--$slot" local-lvm:1
+    fi
+  done
+
+  wait_guest_agent hq-srv "$vmid" 180 || return 1
+  rescan_guest_storage hq-srv "$vmid" || true
+  tmpdir="$(mktemp -d)"
+  out_file="$tmpdir/stdout"
+  err_file="$tmpdir/stderr"
+  meta_file="$tmpdir/meta"
+  if guest_probe "$vmid" "for h in /sys/class/scsi_host/host*; do echo '- - -' > \"\$h/scan\" 2>/dev/null || true; done; udevadm settle 2>/dev/null || true; count=\$(lsblk -dn -b -o NAME,TYPE,SIZE | awk '\$2 == \"disk\" && \$1 != \"sda\" && \$3 >= 800000000 && \$3 <= 1300000000 {c++} END {print c+0}'); echo \"extra_1g_disks=\$count\"; test \"\$count\" -ge 3" "$out_file" "$err_file" "$meta_file"; then
+    module2_ok "HQ-SRV has three extra ~1G disks"
+    print_file_block "STDOUT" "$out_file"
+    rm -rf "$tmpdir"
+    return 0
+  fi
+  module2_fail "HQ-SRV has three extra ~1G disks" "HQ-SRV does not see three extra ~1G disks after qm set/rescan" "if VM is already running and hotplug failed, reboot HQ-SRV and rerun m2.sh"
+  print_file_block "STDOUT" "$out_file"
+  print_file_block "STDERR" "$err_file"
+  rm -rf "$tmpdir"
+  return 1
+}
+
+find_additional_iso() {
+  local storage
+  while read -r storage _; do
+    [[ -n "$storage" && "$storage" != "Name" ]] || continue
+    pvesm list "$storage" --content iso 2>/dev/null | awk '$1 ~ /(^|\/)Additional\.iso$/ || $1 ~ /Additional\.iso$/ {print $1; exit}'
+  done < <(pvesm status 2>/dev/null | awk 'NR > 1 {print $1, $2}')
+}
+
+cdrom_slot_for_vm() {
+  local vmid="$1"
+  local slot
+  if qm config "$vmid" | grep -q 'Additional\.iso'; then
+    qm config "$vmid" | awk -F: '/Additional\.iso/ {print $1; exit}'
+    return 0
+  fi
+  for slot in ide2 ide0 ide1 ide3 sata0 sata1 sata2 sata3; do
+    if ! qm config "$vmid" | grep -q "^${slot}:"; then
+      echo "$slot"
+      return 0
+    fi
+  done
+  return 1
+}
+
+guest_has_cdrom() {
+  local target="$1"
+  local vmid="$2"
+  local tmpdir out_file err_file meta_file
+  tmpdir="$(mktemp -d)"
+  out_file="$tmpdir/stdout"
+  err_file="$tmpdir/stderr"
+  meta_file="$tmpdir/meta"
+  guest_probe "$vmid" 'test -b /dev/sr0 || test -b /dev/cdrom' "$out_file" "$err_file" "$meta_file"
+  local ok=$?
+  rm -rf "$tmpdir"
+  return "$ok"
+}
+
+ensure_vm_cdrom_visible() {
+  local target="$1"
+  local vmid="$2"
+  wait_guest_agent "$target" "$vmid" 180 || return 1
+  rescan_guest_storage "$target" "$vmid" || true
+  if guest_has_cdrom "$target" "$vmid"; then
+    echo "[OK] $target sees Additional.iso cdrom"
+    return 0
+  fi
+
+  echo "[STEP] reboot $target to detect attached Additional.iso"
+  qm reboot "$vmid" || qm reset "$vmid"
+  wait_guest_agent "$target" "$vmid" 240 || return 1
+  rescan_guest_storage "$target" "$vmid" || true
+  if guest_has_cdrom "$target" "$vmid"; then
+    echo "[OK] $target sees Additional.iso cdrom after reboot"
+    return 0
+  fi
+
+  echo "[FAIL] $target still does not see /dev/sr0 or /dev/cdrom"
+  echo "Command: qm guest exec $vmid -- bash -lc 'lsblk; ls -l /dev/sr0 /dev/cdrom'"
+  return 1
+}
+
+attach_additional_iso_to_vm() {
+  local target="$1"
+  local vmid="$2"
+  local iso_volume="$3"
+  local slot
+
+  require_vm "$target" "$vmid"
+  slot="$(cdrom_slot_for_vm "$vmid")" || {
+    echo "[FAIL] no free IDE/SATA CD-ROM slot for $target VMID=$vmid"
+    echo "Command: qm config $vmid"
+    return 1
+  }
+
+  if qm config "$vmid" | grep -q "^${slot}:.*Additional\.iso"; then
+    echo "[OK] Additional.iso already attached to $target at $slot"
+  else
+    echo "[STEP] attach Additional.iso to $target at $slot"
+    qm set "$vmid" "--$slot" "${iso_volume},media=cdrom"
+  fi
+
+  ensure_vm_cdrom_visible "$target" "$vmid"
+}
+
+ensure_module2_additional_iso() {
+  local iso_volume
+  echo "[STEP] ensure Additional.iso attached"
+  iso_volume="$(find_additional_iso | head -n1 || true)"
+  if [[ -z "$iso_volume" ]]; then
+    echo "[FAIL] Additional.iso not found in Proxmox ISO storage. Upload Additional.iso first."
+    echo "Command: pvesm list <storage> --content iso"
+    return 1
+  fi
+  echo "[OK] Additional.iso found: $iso_volume"
+  attach_additional_iso_to_vm hq-srv "$HQ_SRV_VMID" "$iso_volume" || return 1
+  attach_additional_iso_to_vm br-srv "$BR_SRV_VMID" "$iso_volume" || return 1
+}
+
 run_module2_storage() {
+  module2_failed=0
+  ensure_hq_srv_raid_disks || return 1
   run_module_script "module2-storage" hq-srv "scripts/module2/01-hq-srv-storage.sh"
 }
 
@@ -675,10 +836,12 @@ run_module2_ansible() {
 }
 
 run_module2_docker() {
+  ensure_module2_additional_iso || return 1
   run_module_script "module2-docker" br-srv "scripts/module2/04-web-docker.sh"
 }
 
 run_module2_web() {
+  ensure_module2_additional_iso || return 1
   run_module_script "module2-web" hq-srv "scripts/module2/05-hq-srv-web.sh"
 }
 
@@ -701,6 +864,7 @@ run_module2_samba() {
 }
 
 run_module2_all() {
+  show_module2_prereq || return 1
   run_module2_storage || return 1
   run_module2_nfs || return 1
   run_module2_chrony || return 1
@@ -1118,6 +1282,16 @@ show_module2_prereq() {
   module2_agent_check "HQ-CLI reachable" "$HQ_CLI_VMID"
   module2_agent_check "HQ-RTR reachable" "$HQ_RTR_VMID"
   module2_agent_check "BR-RTR reachable" "$BR_RTR_VMID"
+
+  if ! ensure_hq_srv_raid_disks; then
+    :
+  fi
+
+  if ensure_module2_additional_iso; then
+    module2_ok "Additional.iso attached to HQ-SRV and BR-SRV"
+  else
+    module2_fail "Additional.iso attached to HQ-SRV and BR-SRV" "Additional.iso is missing or not visible in guests" "upload Additional.iso to Proxmox ISO storage and rerun m2.sh"
+  fi
 
   module2_guest_check "DNS hq-srv/web/docker works" "$HQ_SRV_VMID" \
     "test \"\$(dig +short @127.0.0.1 hq-srv.${DOMAIN})\" = $HQ_SRV_ADDR && test \"\$(dig +short @127.0.0.1 web.${DOMAIN})\" = $DNS_WEB_IP && test \"\$(dig +short @127.0.0.1 docker.${DOMAIN})\" = $DNS_DOCKER_IP" \

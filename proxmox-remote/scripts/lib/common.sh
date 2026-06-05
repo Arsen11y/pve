@@ -128,3 +128,60 @@ set_module2_defaults() {
 }
 
 set_module2_defaults
+
+rescan_guest_scsi() {
+  local host
+  for host in /sys/class/scsi_host/host*; do
+    echo "- - -" > "$host/scan" 2>/dev/null || true
+  done
+  udevadm settle 2>/dev/null || true
+}
+
+additional_files_present() {
+  local required
+  [[ "$#" -gt 0 ]] || return 1
+  for required in "$@"; do
+    [[ -e "$required" ]] || return 1
+  done
+  return 0
+}
+
+mount_additional_iso() {
+  local required
+  local dev
+  mkdir -p "$ADDITIONAL_MOUNT"
+
+  if [[ "$#" -gt 0 ]] && additional_files_present "$@"; then
+    return 0
+  fi
+  if [[ "$#" -eq 0 ]] && findmnt -n "$ADDITIONAL_MOUNT" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  for dev in "$ADDITIONAL_CDROM_1" "$ADDITIONAL_CDROM_2"; do
+    if [[ -b "$dev" ]]; then
+      mount -o ro "$dev" "$ADDITIONAL_MOUNT" 2>/dev/null || true
+    fi
+    if [[ "$#" -eq 0 ]] && findmnt -n "$ADDITIONAL_MOUNT" >/dev/null 2>&1; then
+      return 0
+    fi
+    if [[ "$#" -gt 0 ]] && additional_files_present "$@"; then
+      return 0
+    fi
+  done
+
+  rescan_guest_scsi
+  for dev in "$ADDITIONAL_CDROM_1" "$ADDITIONAL_CDROM_2"; do
+    if [[ -b "$dev" ]]; then
+      mount -o ro "$dev" "$ADDITIONAL_MOUNT" 2>/dev/null || true
+    fi
+    if [[ "$#" -eq 0 ]] && findmnt -n "$ADDITIONAL_MOUNT" >/dev/null 2>&1; then
+      return 0
+    fi
+    if [[ "$#" -gt 0 ]] && additional_files_present "$@"; then
+      return 0
+    fi
+  done
+
+  return 1
+}

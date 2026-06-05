@@ -39,7 +39,7 @@ host="$(hostname | tr '[:upper:]' '[:lower:]')"
 
 case "$host" in
   br-srv*)
-    safe_apt_install samba samba-dc samba-client krb5-kinit bind-utils
+    safe_apt_install samba samba-dc samba-client samba-winbind-clients samba-winbind-common krb5-kinit bind-utils
     test -x /usr/sbin/samba
     test -x /usr/bin/samba-tool
     test -x /usr/bin/smbclient
@@ -105,12 +105,23 @@ EOFINNER
     ;;
 
   hq-cli*)
-    safe_apt_install samba samba-client krb5-kinit bind-utils winbind sudo
+    safe_apt_install samba samba-client samba-winbind samba-winbind-clients samba-winbind-common krb5-kinit bind-utils sudo openssh-server python3
+    command -v winbindd >/dev/null
+    command -v wbinfo >/dev/null
+    command -v net >/dev/null
+    command -v kinit >/dev/null
+
+    systemctl stop winbind 2>/dev/null || true
+    net ads leave -U "Administrator%$DOMAIN_PASS" 2>/dev/null || true
+    rm -f /var/lib/samba/private/secrets.tdb
+    rm -f /var/lib/samba/private/secrets.ldb
+    rm -f /etc/krb5.keytab
+
     cat > /etc/resolv.conf <<EOFINNER
-nameserver $BR_SRV_ADDR
-nameserver $HQ_SRV_ADDR
 search $DOMAIN
 domain $DOMAIN
+nameserver $BR_SRV_ADDR
+nameserver $HQ_SRV_ADDR
 EOFINNER
 
     cat > /etc/krb5.conf <<EOFINNER
@@ -126,23 +137,24 @@ EOFINNER
     workgroup = $AD_NETBIOS_DOMAIN
     realm = $REALM
     security = ADS
+    kerberos method = secrets and keytab
+    dedicated keytab file = /etc/krb5.keytab
+    winbind use default domain = yes
     winbind enum users = yes
     winbind enum groups = yes
-    winbind use default domain = yes
-    template shell = /bin/bash
-    template homedir = /home/%U
     idmap config * : backend = tdb
     idmap config * : range = 3000-7999
     idmap config $AD_NETBIOS_DOMAIN : backend = rid
     idmap config $AD_NETBIOS_DOMAIN : range = 10000-999999
+    template shell = /bin/bash
+    template homedir = /home/%U
 EOFINNER
 
-    printf '%s\n' "$DOMAIN_PASS" | kinit Administrator || true
-    if ! net ads testjoin 2>/dev/null | grep -q 'Join is OK'; then
-      net ads join -U "Administrator%$DOMAIN_PASS"
-    fi
+    printf '%s\n' "$DOMAIN_PASS" | kinit Administrator
+    net ads join -U "Administrator%$DOMAIN_PASS"
 
-    service_restart_enable winbind
+    systemctl enable --now winbind || service_restart_enable winbind winbindd
+    systemctl restart winbind || systemctl restart winbindd || true
 
     sed -i 's/^passwd:.*/passwd: files winbind systemd/' /etc/nsswitch.conf || true
     sed -i 's/^group:.*/group: files winbind systemd/' /etc/nsswitch.conf || true
@@ -158,8 +170,9 @@ EOFINNER
     wbinfo -t
     wbinfo -u | grep "$DOMAIN_USERS_PREFIX"
     wbinfo -g | grep "$DOMAIN_GROUP"
+    getent passwd "${DOMAIN_USERS_PREFIX}1${DOMAIN_USERS_SUFFIX}"
     id "${DOMAIN_USERS_PREFIX}1${DOMAIN_USERS_SUFFIX}"
-    sudo -l -U "${DOMAIN_USERS_PREFIX}1${DOMAIN_USERS_SUFFIX}" || true
+    sudo -l -U "${DOMAIN_USERS_PREFIX}1${DOMAIN_USERS_SUFFIX}"
     echo "[OK] HQ-CLI joined to Samba domain"
     ;;
 

@@ -11,20 +11,6 @@ if [[ -f /tmp/de-run/scripts/lib/common.sh ]]; then
   source /tmp/de-run/scripts/lib/common.sh
 fi
 
-mount_additional_iso() {
-  mkdir -p "$ADDITIONAL_MOUNT"
-  if findmnt -n "$ADDITIONAL_MOUNT" >/dev/null 2>&1; then
-    return 0
-  fi
-  if [[ -b "$ADDITIONAL_CDROM_1" ]]; then
-    mount -o ro "$ADDITIONAL_CDROM_1" "$ADDITIONAL_MOUNT" || true
-  fi
-  if ! findmnt -n "$ADDITIONAL_MOUNT" >/dev/null 2>&1 && [[ -b "$ADDITIONAL_CDROM_2" ]]; then
-    mount -o ro "$ADDITIONAL_CDROM_2" "$ADDITIONAL_MOUNT" || true
-  fi
-  findmnt -n "$ADDITIONAL_MOUNT" >/dev/null 2>&1
-}
-
 service_restart_enable() {
   local svc
   for svc in "$@"; do
@@ -45,16 +31,18 @@ if [[ "$host" != hq-srv* ]]; then
   exit 1
 fi
 
-if ! mount_additional_iso; then
+dump_sql="$ADDITIONAL_MOUNT/web/dump.sql"
+index_php="$ADDITIONAL_MOUNT/web/index.php"
+logo_png="$ADDITIONAL_MOUNT/web/logo.png"
+
+if ! mount_additional_iso "$dump_sql" "$index_php" "$logo_png"; then
   echo "[FAIL] Additional.iso is not mounted"
   echo "Command: mount -o ro /dev/sr0 $ADDITIONAL_MOUNT"
   echo "Next hint: attach Additional.iso to HQ-SRV CD-ROM and rerun module2-web"
+  lsblk || true
+  ls -la "$ADDITIONAL_MOUNT" 2>/dev/null || true
   exit 1
 fi
-
-test -f "$ADDITIONAL_MOUNT/web/dump.sql"
-test -f "$ADDITIONAL_MOUNT/web/index.php"
-test -f "$ADDITIONAL_MOUNT/web/logo.png"
 
 safe_apt_install apache2 apache2-mod_php8.0 php8.0 php8.0-mysqli mariadb-server mariadb-client
 
@@ -69,11 +57,11 @@ GRANT ALL PRIVILEGES ON $WEB_DB_NAME.* TO '$WEB_DB_USER'@'localhost';
 FLUSH PRIVILEGES;
 EOFINNER
 
-mysql -uroot "$WEB_DB_NAME" < "$ADDITIONAL_MOUNT/web/dump.sql"
+mysql -uroot "$WEB_DB_NAME" < "$dump_sql"
 
 mkdir -p "$WEB_DOCROOT"
-cp "$ADDITIONAL_MOUNT/web/index.php" "$WEB_DOCROOT/index.php"
-cp "$ADDITIONAL_MOUNT/web/logo.png" "$WEB_DOCROOT/logo.png"
+cp "$index_php" "$WEB_DOCROOT/index.php"
+cp "$logo_png" "$WEB_DOCROOT/logo.png"
 if [[ -f "$WEB_DOCROOT/index.html" && ! -f "$WEB_DOCROOT/index.html.bak" ]]; then
   mv "$WEB_DOCROOT/index.html" "$WEB_DOCROOT/index.html.bak"
 elif [[ -f "$WEB_DOCROOT/index.html" ]]; then

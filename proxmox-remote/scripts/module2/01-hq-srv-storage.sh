@@ -22,6 +22,7 @@ if [[ -b "$RAID_DEVICE" ]] && findmnt -n "$RAID_MOUNT" >/dev/null 2>&1; then
 fi
 
 safe_apt_install mdadm e2fsprogs
+rescan_guest_scsi
 
 root_source="$(findmnt -n -o SOURCE / || true)"
 root_disk=""

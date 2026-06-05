@@ -11,20 +11,6 @@ if [[ -f /tmp/de-run/scripts/lib/common.sh ]]; then
   source /tmp/de-run/scripts/lib/common.sh
 fi
 
-mount_additional_iso() {
-  mkdir -p "$ADDITIONAL_MOUNT"
-  if findmnt -n "$ADDITIONAL_MOUNT" >/dev/null 2>&1; then
-    return 0
-  fi
-  if [[ -b "$ADDITIONAL_CDROM_1" ]]; then
-    mount -o ro "$ADDITIONAL_CDROM_1" "$ADDITIONAL_MOUNT" || true
-  fi
-  if ! findmnt -n "$ADDITIONAL_MOUNT" >/dev/null 2>&1 && [[ -b "$ADDITIONAL_CDROM_2" ]]; then
-    mount -o ro "$ADDITIONAL_CDROM_2" "$ADDITIONAL_MOUNT" || true
-  fi
-  findmnt -n "$ADDITIONAL_MOUNT" >/dev/null 2>&1
-}
-
 service_restart_enable() {
   local svc
   for svc in "$@"; do
@@ -45,17 +31,17 @@ if [[ "$host" != br-srv* ]]; then
   exit 1
 fi
 
-if ! mount_additional_iso; then
+db_tar="$ADDITIONAL_MOUNT/docker/postgresql_latest.tar"
+site_tar="$ADDITIONAL_MOUNT/docker/site_latest.tar"
+
+if ! mount_additional_iso "$db_tar" "$site_tar"; then
   echo "[FAIL] Additional.iso is not mounted"
   echo "Command: mount -o ro /dev/sr0 $ADDITIONAL_MOUNT"
   echo "Next hint: attach Additional.iso to BR-SRV CD-ROM and rerun module2-docker"
+  lsblk || true
+  ls -la "$ADDITIONAL_MOUNT" 2>/dev/null || true
   exit 1
 fi
-
-db_tar="$ADDITIONAL_MOUNT/docker/postgresql_latest.tar"
-site_tar="$ADDITIONAL_MOUNT/docker/site_latest.tar"
-test -f "$db_tar"
-test -f "$site_tar"
 
 if safe_apt_install docker; then
   echo "[OK] docker package install attempted"
