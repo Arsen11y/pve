@@ -61,6 +61,97 @@ inventory_needs_refresh() {
   return 1
 }
 
+bootstrap_retry_hint() {
+  if [[ "${REQUEST_SUBCOMMAND:-}" == module2* || "${REQUEST_COMMAND:-}" == "prereq" ]]; then
+    echo "Retry: curl -fsSL https://raw.githubusercontent.com/Arsen11y/pve/main/m2.sh | bash"
+  else
+    echo "Retry: curl -fsSL https://raw.githubusercontent.com/Arsen11y/pve/main/m1.sh | bash"
+  fi
+}
+
+curl_raw_to_file() {
+  local url="$1"
+  local dest="$2"
+  local label="$3"
+  local kind="${4:-generic}"
+  local expected="${5:-}"
+  local tmp
+  tmp="${dest}.download"
+
+  rm -f "$tmp"
+  if ! curl --retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 20 --max-time 120 -fSL "$url" > "$tmp"; then
+    echo "[FAIL] failed to download required file: $label"
+    echo "URL: $url"
+    bootstrap_retry_hint
+    rm -f "$tmp"
+    return 1
+  fi
+
+  if [[ ! -s "$tmp" ]]; then
+    echo "[FAIL] downloaded required file is empty: $label"
+    echo "URL: $url"
+    bootstrap_retry_hint
+    rm -f "$tmp"
+    return 1
+  fi
+
+  if head -n 8 "$tmp" | grep -Eqi '<html|<!doctype|404:|not found|rate limit|bad gateway|service unavailable|error'; then
+    echo "[FAIL] downloaded required file looks like an HTML/error response: $label"
+    echo "URL: $url"
+    bootstrap_retry_hint
+    rm -f "$tmp"
+    return 1
+  fi
+
+  if [[ -n "$expected" ]] && ! grep -q "$expected" "$tmp"; then
+    echo "[FAIL] downloaded required file does not contain expected marker: $label"
+    echo "URL: $url"
+    echo "Expected marker: $expected"
+    bootstrap_retry_hint
+    rm -f "$tmp"
+    return 1
+  fi
+
+  case "$kind" in
+    common)
+      if ! grep -q 'safe_apt_install' "$tmp"; then
+        echo "[FAIL] common.sh was not loaded correctly: safe_apt_install missing"
+        echo "URL: $url"
+        bootstrap_retry_hint
+        rm -f "$tmp"
+        return 1
+      fi
+      ;;
+    script)
+      if ! bash -n "$tmp"; then
+        echo "[FAIL] target script failed shell syntax validation: $label"
+        echo "URL: $url"
+        bootstrap_retry_hint
+        rm -f "$tmp"
+        return 1
+      fi
+      if ! grep -Eq '(^#!|set -|hostnamectl|safe_apt_install|echo|cat|case |if |for |systemctl|write_eth_)' "$tmp"; then
+        echo "[FAIL] target script does not look like shell code: $label"
+        echo "URL: $url"
+        bootstrap_retry_hint
+        rm -f "$tmp"
+        return 1
+      fi
+      ;;
+    runner)
+      if ! bash -n "$tmp"; then
+        echo "[FAIL] runner failed shell syntax validation: $label"
+        echo "URL: $url"
+        bootstrap_retry_hint
+        rm -f "$tmp"
+        return 1
+      fi
+      ;;
+  esac
+
+  mv "$tmp" "$dest"
+}
+
 set_module2_defaults() {
   : "${DOMAIN:=au-team.irpo}"
   : "${REALM:=AU-TEAM.IRPO}"
@@ -142,7 +233,7 @@ refresh_inventory_from_raw() {
   local action="$1"
   echo "[STEP] ${action} inventory: $INV"
   mkdir -p "$(dirname "$INV")"
-  curl -fsSL "$DE_RAW_URL/inventory.example.env" > "${INV}.tmp"
+  curl_raw_to_file "$DE_RAW_URL/inventory.example.env" "${INV}.tmp" "inventory.example.env" "inventory" "ISP_VMID="
   mv "${INV}.tmp" "$INV"
   echo "[OK] inventory loaded from $DE_RAW_URL/inventory.example.env"
 }
@@ -270,7 +361,15 @@ guest_ping() {
 
 fetch() {
   local rel="$1"
-  curl -fsSL "$DE_RAW_URL/$rel"
+  curl --retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 20 --max-time 120 -fSL "$DE_RAW_URL/$rel"
+}
+
+fetch_to_file() {
+  local rel="$1"
+  local dest="$2"
+  local kind="${3:-generic}"
+  local marker="${4:-}"
+  curl_raw_to_file "$DE_RAW_URL/$rel" "$dest" "$rel" "$kind" "$marker"
 }
 
 base64_file() {
@@ -560,9 +659,15 @@ stage_run_files() {
   tmpdir="$(mktemp -d)"
   mkdir -p "$tmpdir/scripts/lib" "$tmpdir/scripts/module1" "$tmpdir/scripts/module2"
   cp "$INV" "$tmpdir/de-inventory.env"
-  fetch "scripts/lib/common.sh" > "$tmpdir/scripts/lib/common.sh"
+  fetch_to_file "scripts/lib/common.sh" "$tmpdir/scripts/lib/common.sh" "common" "safe_apt_install" || {
+    rm -rf "$tmpdir"
+    return 1
+  }
   mkdir -p "$(dirname "$tmpdir/$script_rel")"
-  fetch "$script_rel" > "$tmpdir/$script_rel"
+  fetch_to_file "$script_rel" "$tmpdir/$script_rel" "script" || {
+    rm -rf "$tmpdir"
+    return 1
+  }
 
   install_guest_file "$target" "$vmid" "$tmpdir/de-inventory.env" "/tmp/de-run/de-inventory.env" 0600
   install_guest_file "$target" "$vmid" "$tmpdir/scripts/lib/common.sh" "/tmp/de-run/scripts/lib/common.sh" 0644
@@ -594,7 +699,10 @@ run_one() {
   fi
   echo "[OK] qemu-guest-agent is available"
 
-  stage_run_files "$target" "$vmid" "$script_rel"
+  if ! stage_run_files "$target" "$vmid" "$script_rel"; then
+    echo "[FAIL] required runner files were not staged; VM command was not started"
+    return 1
+  fi
 
   cmd="$(cat <<EOF
 set -euo pipefail
@@ -602,6 +710,7 @@ set -a
 source /tmp/de-run/de-inventory.env
 set +a
 source /tmp/de-run/scripts/lib/common.sh
+declare -F safe_apt_install >/dev/null || { echo "[FAIL] common.sh was not loaded: safe_apt_install missing"; exit 127; }
 source /tmp/de-run/$script_rel
 EOF
 )"
@@ -635,7 +744,10 @@ run_module_script() {
   fi
   echo "[OK] qemu-guest-agent is available"
 
-  stage_run_files "$target" "$vmid" "$script_rel"
+  if ! stage_run_files "$target" "$vmid" "$script_rel"; then
+    echo "[FAIL] required runner files were not staged; VM command was not started"
+    return 1
+  fi
 
   cmd="$(cat <<EOF
 set -euo pipefail
@@ -643,6 +755,7 @@ set -a
 source /tmp/de-run/de-inventory.env
 set +a
 source /tmp/de-run/scripts/lib/common.sh
+declare -F safe_apt_install >/dev/null || { echo "[FAIL] common.sh was not loaded: safe_apt_install missing"; exit 127; }
 source /tmp/de-run/$script_rel
 EOF
 )"
@@ -1101,7 +1214,7 @@ ensure_demo_inventory() {
 
 check_proxmox_internet() {
   echo "[STEP] check Proxmox internet"
-  if curl -fsSL --connect-timeout 10 "$DE_RAW_URL/run.sh" >/dev/null; then
+  if curl --retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 20 --max-time 120 -fSL "$DE_RAW_URL/run.sh" >/dev/null; then
     echo "[OK] Proxmox can reach $DE_RAW_URL"
   else
     echo "[FAIL] Proxmox cannot reach $DE_RAW_URL"
