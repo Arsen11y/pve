@@ -103,16 +103,20 @@ run.sh - remote Proxmox runner through qemu-guest-agent.
 Commands:
   check                    Check VM presence and qemu-guest-agent
   check module1            Compact Module 1 GRE/OSPF/DNS/end-to-end report
-  check module2            Module 2 prereq checks only
+  check module2            Module 2 storage/NFS/chrony/ansible checks
   demo module1             Prepare VLANs, run all Module 1 targets, then check
-  demo module2             Check prereq and print planned Module 2 steps
-  prereq module2           Same as check module2
+  demo module2             Run Module 2 prereq, storage, NFS, chrony, ansible, then check
+  prereq module2           Check Module 1 baseline before Module 2
   prepare-vlans            Add/replace Proxmox VLAN tags for HQ-SRV/HQ-CLI
   list                     Show qm list
   ifaces <target>          Show ip -br a inside VM
   status <target>          Show hostname, ip and routes inside VM
   status module1           Same as check module1
   run <target>             Run target configuration
+  run module2-storage      Configure RAID5 on HQ-SRV
+  run module2-nfs          Configure NFS server on HQ-SRV and mount on HQ-CLI
+  run module2-chrony       Configure ISP chrony server and clients
+  run module2-ansible      Configure Ansible control node on BR-SRV
 
 Targets:
   isp
@@ -463,9 +467,10 @@ stage_run_files() {
   local tmpdir
 
   tmpdir="$(mktemp -d)"
-  mkdir -p "$tmpdir/scripts/lib" "$tmpdir/scripts/module1"
+  mkdir -p "$tmpdir/scripts/lib" "$tmpdir/scripts/module1" "$tmpdir/scripts/module2"
   cp "$INV" "$tmpdir/de-inventory.env"
   fetch "scripts/lib/common.sh" > "$tmpdir/scripts/lib/common.sh"
+  mkdir -p "$(dirname "$tmpdir/$script_rel")"
   fetch "$script_rel" > "$tmpdir/$script_rel"
 
   install_guest_file "$target" "$vmid" "$tmpdir/de-inventory.env" "/tmp/de-run/de-inventory.env" 0600
@@ -513,6 +518,66 @@ EOF
   if ! guest_exec_pretty "$target" "$vmid" "RUN" "$cmd"; then
     return 1
   fi
+}
+
+run_module_script() {
+  local label="$1"
+  local target="$2"
+  local script_rel="$3"
+  local vmid
+  local cmd
+
+  vmid="$(target_vmid "$target")"
+  require_vm "$target" "$vmid"
+
+  echo
+  echo "============================================================"
+  echo "[RUN] block=$label target=$target vmid=$vmid script=$script_rel"
+  echo "============================================================"
+
+  if ! guest_ping "$vmid"; then
+    echo "[FAIL] qemu-guest-agent is not available"
+    echo "Reason: qemu-guest-agent is not reachable"
+    echo "Command: qm agent $vmid ping"
+    echo "Next hint: start qemu-guest-agent inside target VM"
+    return 1
+  fi
+  echo "[OK] qemu-guest-agent is available"
+
+  stage_run_files "$target" "$vmid" "$script_rel"
+
+  cmd="$(cat <<EOF
+set -euo pipefail
+set -a
+source /tmp/de-run/de-inventory.env
+set +a
+source /tmp/de-run/scripts/lib/common.sh
+source /tmp/de-run/$script_rel
+EOF
+)"
+
+  guest_exec_pretty "$target" "$vmid" "RUN $label" "$cmd"
+}
+
+run_module2_storage() {
+  run_module_script "module2-storage" hq-srv "scripts/module2/01-hq-srv-storage.sh"
+}
+
+run_module2_nfs() {
+  run_module_script "module2-nfs server" hq-srv "scripts/module2/02-hq-srv-nfs.sh" || return 1
+  run_module_script "module2-nfs client" hq-cli "scripts/module2/02-hq-srv-nfs.sh" || return 1
+}
+
+run_module2_chrony() {
+  run_module_script "module2-chrony server" isp "scripts/module2/03-chrony.sh" || return 1
+  run_module_script "module2-chrony hq-srv" hq-srv "scripts/module2/03-chrony.sh" || return 1
+  run_module_script "module2-chrony hq-cli" hq-cli "scripts/module2/03-chrony.sh" || return 1
+  run_module_script "module2-chrony br-rtr" br-rtr "scripts/module2/03-chrony.sh" || return 1
+  run_module_script "module2-chrony br-srv" br-srv "scripts/module2/03-chrony.sh" || return 1
+}
+
+run_module2_ansible() {
+  run_module_script "module2-ansible" br-srv "scripts/module2/04-br-srv-ansible.sh"
 }
 
 check_all() {
@@ -935,11 +1000,95 @@ show_module2_prereq() {
     "sshd is not listening on port $SSH_PORT on BR-SRV" \
     "check systemctl status sshd --no-pager"
 
+  module2_guest_check "HQ-CLI has address from $HQ_CLI_NET" "$HQ_CLI_VMID" \
+    "ip -4 -o addr show dev $HQ_CLI_IF | awk '{print \$4}' | grep -q '^192\\.168\\.213\\.'" \
+    "HQ-CLI does not have a 192.168.213.x IPv4 address" \
+    "run Module 1 again or check DHCP on HQ-RTR"
+
   echo
   if [[ "$module2_failed" -eq 0 ]]; then
     echo "RESULT: MODULE 2 PREREQ PASSED"
   else
     echo "RESULT: MODULE 2 PREREQ FAILED"
+    echo "Run first:"
+    echo "curl -fsSL https://raw.githubusercontent.com/Arsen11y/pve/main/m1.sh | bash"
+    return 1
+  fi
+}
+
+show_module2_status() {
+  if [[ "$INVENTORY_LOADED" -ne 1 ]]; then
+    load_inventory
+  fi
+
+  echo
+  echo "============================================================"
+  echo "MODULE 2 CHECK SUMMARY"
+  echo "============================================================"
+  echo
+
+  module2_failed=0
+
+  if show_module2_prereq; then
+    module2_ok "Module 1 prerequisite"
+  else
+    module2_fail "Module 1 prerequisite" "Module 1 prereq failed" "Run first: curl -fsSL https://raw.githubusercontent.com/Arsen11y/pve/main/m1.sh | bash"
+  fi
+
+  module2_guest_check "HQ-SRV RAID5 $RAID_DEVICE mounted on $RAID_MOUNT" "$HQ_SRV_VMID" \
+    "test -e $RAID_DEVICE && findmnt -n $RAID_MOUNT >/dev/null && findmnt -n -o FSTYPE $RAID_MOUNT | grep -q '^ext4$' && test -f /etc/mdadm.conf && grep -q '${RAID_DEVICE##/dev/}' /proc/mdstat" \
+    "$RAID_DEVICE is missing, $RAID_MOUNT is not mounted as ext4, or /etc/mdadm.conf is missing" \
+    "run: bash run.sh run module2-storage"
+
+  module2_guest_check "HQ-SRV NFS export $NFS_DIR" "$HQ_SRV_VMID" \
+    "test -d $NFS_DIR && exportfs -v | grep -q '$NFS_DIR' && exportfs -v | grep -q '${HQ_CLI_NET%/*}'" \
+    "$NFS_DIR is not exported to $HQ_CLI_NET" \
+    "run: bash run.sh run module2-nfs"
+
+  module2_guest_check "HQ-CLI NFS mount $NFS_CLIENT_MOUNT" "$HQ_CLI_VMID" \
+    "findmnt -n $NFS_CLIENT_MOUNT >/dev/null && touch $NFS_CLIENT_MOUNT/module2-check-from-hq-cli.txt" \
+    "$NFS_CLIENT_MOUNT is not mounted or is not writable from HQ-CLI" \
+    "check /etc/fstab on HQ-CLI and exportfs -v on HQ-SRV"
+
+  module2_guest_check "ISP chrony server" "$ISP_VMID" \
+    "(systemctl is-active --quiet chronyd || systemctl is-active --quiet chrony) && (command -v chronyc >/dev/null 2>&1 && chronyc tracking >/dev/null || true)" \
+    "chrony service is not active on ISP" \
+    "run: bash run.sh run module2-chrony"
+
+  module2_guest_check "Chrony client HQ-SRV" "$HQ_SRV_VMID" \
+    "(systemctl is-active --quiet chronyd || systemctl is-active --quiet chrony) && (command -v chronyc >/dev/null 2>&1 && chronyc sources >/dev/null || true)" \
+    "chrony client is not active on HQ-SRV" \
+    "run: bash run.sh run module2-chrony"
+  module2_guest_check "Chrony client HQ-CLI" "$HQ_CLI_VMID" \
+    "(systemctl is-active --quiet chronyd || systemctl is-active --quiet chrony) && (command -v chronyc >/dev/null 2>&1 && chronyc sources >/dev/null || true)" \
+    "chrony client is not active on HQ-CLI" \
+    "run: bash run.sh run module2-chrony"
+  module2_guest_check "Chrony client BR-RTR" "$BR_RTR_VMID" \
+    "(systemctl is-active --quiet chronyd || systemctl is-active --quiet chrony) && (command -v chronyc >/dev/null 2>&1 && chronyc sources >/dev/null || true)" \
+    "chrony client is not active on BR-RTR" \
+    "run: bash run.sh run module2-chrony"
+  module2_guest_check "Chrony client BR-SRV" "$BR_SRV_VMID" \
+    "(systemctl is-active --quiet chronyd || systemctl is-active --quiet chrony) && (command -v chronyc >/dev/null 2>&1 && chronyc sources >/dev/null || true)" \
+    "chrony client is not active on BR-SRV" \
+    "run: bash run.sh run module2-chrony"
+
+  module2_guest_check "BR-SRV Ansible inventory" "$BR_SRV_VMID" \
+    "test -f $ANSIBLE_WORKDIR/hosts && command -v ansible >/dev/null 2>&1 && ansible --version >/dev/null" \
+    "Ansible inventory or ansible binary is missing on BR-SRV" \
+    "run: bash run.sh run module2-ansible"
+
+  module2_guest_check "Ansible ping" "$BR_SRV_VMID" \
+    "cd $ANSIBLE_WORKDIR && ansible all -m ping" \
+    "ansible all -m ping failed" \
+    "check SSH users/ports and $ANSIBLE_WORKDIR/hosts"
+
+  echo "[WARN] Samba DC not implemented yet"
+  echo "[WARN] Docker/Web/DNAT/Proxy/Basic auth not implemented yet"
+  echo
+  if [[ "$module2_failed" -eq 0 ]]; then
+    echo "RESULT: MODULE 2 PARTIAL PASSED"
+  else
+    echo "RESULT: MODULE 2 PARTIAL FAILED"
     return 1
   fi
 }
@@ -952,24 +1101,46 @@ MODULE 2 PLANNED STEPS
 ======================
 
 [PLAN] 00-prereq.sh
-  Verify Module 1 baseline, DNS, qemu-guest-agent, VLANs $VLAN_SRV/$VLAN_CLI/$VLAN_MGMT, and SSH $SSH_PORT.
-[PLAN] 01-hq-srv-storage.sh
+  Implemented: verify Module 1 baseline, DNS, qemu-guest-agent, VLANs $VLAN_SRV/$VLAN_CLI/$VLAN_MGMT, SSH $SSH_PORT, HQ-CLI DHCP, and end-to-end reachability.
+[RUN] 01-hq-srv-storage.sh
   RAID${RAID_LEVEL:-5} from ${RAID_DISK_COUNT:-3} x ${RAID_DISK_SIZE_GB:-1}GB disks on HQ-SRV, ${RAID_DEVICE:-/dev/md3}, mdadm.conf, ext4, mount ${RAID_MOUNT:-/raid}, NFS ${NFS_DIR:-/raid/nfs}, HQ-CLI automount ${NFS_CLIENT_MOUNT:-/mnt/nfs}.
-[PLAN] 02-br-srv-domain.sh
+[RUN] 02-hq-srv-nfs.sh
+  NFS server on HQ-SRV exports ${NFS_DIR:-/raid/nfs} to ${HQ_CLI_NET:-192.168.213.0/27}; HQ-CLI mounts it at ${NFS_CLIENT_MOUNT:-/mnt/nfs}.
+[RUN] 03-chrony.sh
+  ISP chrony server with stratum ${NTP_STRATUM:-8}; HQ-SRV/HQ-CLI/BR-RTR/BR-SRV as clients.
+[RUN] 04-br-srv-ansible.sh
+  Ansible control node on BR-SRV in ${ANSIBLE_WORKDIR:-/etc/ansible}; inventory HQ-SRV/HQ-CLI/HQ-RTR/BR-RTR; ansible all -m ping check.
+[PLAN] Samba DC
   Samba DC on BR-SRV for ${DOMAIN:-au-team.irpo}/${REALM:-AU-TEAM.IRPO}, users ${DOMAIN_USERS_PREFIX:-hquser}1-${DOMAIN_USERS_PREFIX:-hquser}${DOMAIN_USERS_COUNT:-5}, group ${DOMAIN_GROUP:-hq}, sudo only cat/grep/id, HQ-CLI domain join.
-[PLAN] 03-time-ansible.sh
-  Chrony server role ${NTP_SERVER_ROLE:-ISP}, stratum ${NTP_STRATUM:-8}, clients HQ-SRV/HQ-CLI/BR-RTR/BR-SRV; Ansible on BR-SRV in ${ANSIBLE_WORKDIR:-/etc/ansible}, ansible all -m ping; optional ${HQ_CLI_BROWSER:-Yandex Browser} on HQ-CLI.
-[PLAN] 04-web-docker.sh
+[PLAN] Docker/Web
   Docker on BR-SRV: images ${DOCKER_IMAGE_APP:-site_latest}/${DOCKER_IMAGE_DB:-postgresql_latest}, containers ${DOCKER_APP_CONTAINER:-site}/${DOCKER_DB_CONTAINER:-db}, DB ${DOCKER_DB_NAME:-testdb3}, user ${DOCKER_DB_USER:-test3c}, port ${DOCKER_APP_PORT:-8083}; Apache + MariaDB on HQ-SRV: DB ${WEB_DB_NAME:-webdb}, user ${WEB_DB_USER:-web3}, import dump.sql, copy index.php/images.
-[PLAN] 05-proxy-dnat.sh
+[PLAN] DNAT/Proxy
   DNAT ${DOCKER_APP_PORT:-8083}: HQ-RTR -> HQ-SRV web, BR-RTR -> BR-SRV docker; DNAT ${SSH_PORT:-2013}: HQ-RTR -> HQ-SRV SSH, BR-RTR -> BR-SRV SSH; nginx reverse proxy on ISP: ${WEB_DOMAIN:-web.au-team.irpo} -> HQ-SRV web, ${DOCKER_DOMAIN:-docker.au-team.irpo} -> BR-SRV site.
-[PLAN] 06-security-firewall.sh
+[PLAN] Basic auth
   Basic auth on ISP for ${WEB_DOMAIN:-web.au-team.irpo}: ${BASIC_AUTH_USER:-Kazimirc}, file ${BASIC_AUTH_FILE:-/etc/nginx/.htpasswd}; firewall rules after DNAT/proxy are confirmed.
-[PLAN] 07-logging-monitoring-backup.sh
-  CUPS PDF, rsyslog, monitoring ${MON_DOMAIN:-mon.au-team.irpo}, HQ-SRV backup ${BACKUP_DIR:-/backup}.
 
-No heavy services are configured by demo module2 yet.
+Samba, Docker/Web, DNAT/Proxy, and Basic auth are planned only in this step.
 EOF
+}
+
+module2_step() {
+  local label="$1"
+  local command_text="$2"
+  local hint="$3"
+  shift 3
+
+  echo
+  echo "[STEP] $label"
+  if "$@"; then
+    echo "[OK] $label"
+    return 0
+  fi
+
+  echo "[FAIL] $label"
+  echo "Reason: block command failed"
+  echo "Command: $command_text"
+  echo "Next hint: $hint"
+  return 1
 }
 
 demo_module2() {
@@ -979,18 +1150,38 @@ demo_module2() {
   fi
 
   echo "============================================================"
-  echo "MODULE 2 DEMO SCAFFOLD"
+  echo "MODULE 2 DEMO RUN"
   echo "============================================================"
-  echo "This mode checks prereq only and prints the planned steps."
+  echo "This mode configures storage, NFS, chrony, and Ansible, then runs partial checks."
 
-  if ! show_module2_prereq; then
+  if ! module2_step "prereq module2" "bash run.sh prereq module2" "Run first: curl -fsSL https://raw.githubusercontent.com/Arsen11y/pve/main/m1.sh | bash" show_module2_prereq; then
     echo "RESULT: MODULE 2 DEMO BLOCKED"
+    return 1
+  fi
+  if ! module2_step "run module2-storage" "bash run.sh run module2-storage" "check extra 1GB disks on HQ-SRV and rerun module2-storage" run_module2_storage; then
+    echo "RESULT: MODULE 2 FAILED"
+    return 1
+  fi
+  if ! module2_step "run module2-nfs" "bash run.sh run module2-nfs" "check RAID mount on HQ-SRV and network from HQ-CLI to HQ-SRV" run_module2_nfs; then
+    echo "RESULT: MODULE 2 FAILED"
+    return 1
+  fi
+  if ! module2_step "run module2-chrony" "bash run.sh run module2-chrony" "check chrony package availability and service name on ALT" run_module2_chrony; then
+    echo "RESULT: MODULE 2 FAILED"
+    return 1
+  fi
+  if ! module2_step "run module2-ansible" "bash run.sh run module2-ansible" "check ansible/sshpass packages and SSH reachability from BR-SRV" run_module2_ansible; then
+    echo "RESULT: MODULE 2 FAILED"
+    return 1
+  fi
+  if ! module2_step "check module2" "bash run.sh check module2" "inspect failed check output above and rerun the failed block" show_module2_status; then
+    echo "RESULT: MODULE 2 PARTIAL FAILED"
     return 1
   fi
 
   print_module2_plan
   echo
-  echo "RESULT: MODULE 2 DEMO READY"
+  echo "RESULT: MODULE 2 PARTIAL PASSED"
 }
 
 main() {
@@ -1002,7 +1193,7 @@ main() {
           show_module1_status
           ;;
         module2)
-          show_module2_prereq
+          show_module2_status
           ;;
         *)
           check_all
@@ -1062,6 +1253,18 @@ main() {
           ;;
         isp|hq-rtr|br-rtr|hq-srv|br-srv|hq-cli)
           run_one "$2"
+          ;;
+        module2-storage)
+          run_module2_storage
+          ;;
+        module2-nfs)
+          run_module2_nfs
+          ;;
+        module2-chrony)
+          run_module2_chrony
+          ;;
+        module2-ansible)
+          run_module2_ansible
           ;;
         *)
           usage

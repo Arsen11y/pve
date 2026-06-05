@@ -13,7 +13,8 @@ fi
 
 echo "Module 2 prereq plan"
 echo "- Verify Module 1 routes, DNS, GRE/OSPF, and SSH baseline before changing services."
-echo "- Verify inventory variables for hquser domain users, RAID5, NFS, Chrony ISP role, Docker site, web stack, DNAT, proxy, basic auth, and HQ-CLI browser."
+echo "- Implemented blocks: RAID5 storage, NFS, Chrony, Ansible scaffold/check."
+echo "- Planned-only blocks: Samba DC, Docker app, web stack, DNAT, proxy, basic auth, and HQ-CLI browser."
 echo "Read-only local checks:"
 hostname || true
 ip -br a || true
