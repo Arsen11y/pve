@@ -23,6 +23,18 @@ service_restart_enable() {
   return 1
 }
 
+ensure_samba_a_record() {
+  local name="$1"
+  local addr="$2"
+  local old_addr
+  shift 2
+  for old_addr in "$@" "$addr"; do
+    samba-tool dns delete 127.0.0.1 "$DOMAIN" "$name" A "$old_addr" -U "Administrator%$DOMAIN_PASS" 2>/dev/null || true
+  done
+  samba-tool dns add 127.0.0.1 "$DOMAIN" "$name" A "$addr" -U "Administrator%$DOMAIN_PASS" 2>/dev/null || true
+  samba-tool dns query 127.0.0.1 "$DOMAIN" "$name" A -U "Administrator%$DOMAIN_PASS" | grep -q "$addr"
+}
+
 host="$(hostname | tr '[:upper:]' '[:lower:]')"
 
 case "$host" in
@@ -66,20 +78,13 @@ EOFINNER
 
     service_restart_enable samba samba-ad-dc
 
-    samba-tool dns delete 127.0.0.1 "$DOMAIN" br-srv A 172.17.0.1 -U "Administrator%$DOMAIN_PASS" 2>/dev/null || true
-    samba-tool dns delete 127.0.0.1 "$DOMAIN" br-srv A 172.18.0.1 -U "Administrator%$DOMAIN_PASS" 2>/dev/null || true
-    samba-tool dns add 127.0.0.1 "$DOMAIN" br-srv A "$BR_SRV_ADDR" -U "Administrator%$DOMAIN_PASS" 2>/dev/null || true
-    for rec in \
-      "hq-srv:$HQ_SRV_ADDR" \
-      "hq-rtr:$HQ_RTR_SRV_ADDR" \
-      "hq-cli:$HQ_CLI_ADDR" \
-      "br-rtr:$BR_RTR_LAN_ADDR" \
-      "web:$DNS_WEB_IP" \
-      "docker:$DNS_DOCKER_IP"; do
-      name="${rec%%:*}"
-      addr="${rec#*:}"
-      samba-tool dns add 127.0.0.1 "$DOMAIN" "$name" A "$addr" -U "Administrator%$DOMAIN_PASS" 2>/dev/null || true
-    done
+    ensure_samba_a_record br-srv "$BR_SRV_ADDR" 172.17.0.1 172.18.0.1
+    ensure_samba_a_record hq-srv "$HQ_SRV_ADDR" 192.168.100.2
+    ensure_samba_a_record hq-rtr "$HQ_RTR_SRV_ADDR" 192.168.100.1
+    ensure_samba_a_record hq-cli "$HQ_CLI_ADDR" 192.168.200.10 192.168.200.11 192.168.213.10
+    ensure_samba_a_record br-rtr "$BR_RTR_LAN_ADDR"
+    ensure_samba_a_record web "$DNS_WEB_IP" 172.16.1.1
+    ensure_samba_a_record docker "$DNS_DOCKER_IP" 172.16.2.1
 
     samba-tool group show "$DOMAIN_GROUP" >/dev/null 2>&1 || samba-tool group add "$DOMAIN_GROUP"
     for i in $(seq 1 "$DOMAIN_USERS_COUNT"); do

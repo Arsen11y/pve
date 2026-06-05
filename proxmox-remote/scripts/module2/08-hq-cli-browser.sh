@@ -22,7 +22,7 @@ fi
 safe_apt_install "$YANDEX_BROWSER_PREINSTALL_PACKAGE" "$YANDEX_BROWSER_PACKAGE"
 
 rpm -qa | grep "$YANDEX_BROWSER_PACKAGE"
-test -x /usr/bin/yandex-browser-stable
+test -x "$YANDEX_BROWSER_BIN"
 test -f /usr/share/applications/yandex-browser.desktop
-/usr/bin/yandex-browser-stable --version | grep -i Yandex
+"$YANDEX_BROWSER_BIN" --version | grep -i Yandex
 echo "[OK] Yandex Browser installed on HQ-CLI"

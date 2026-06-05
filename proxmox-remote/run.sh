@@ -52,7 +52,90 @@ inventory_needs_refresh() {
   grep -q '^DNS_BR_RTR_IP=192\.168\.10\.1$' "$INV" || return 0
   grep -q '^DNS_WEB_IP=172\.16\.50\.1$' "$INV" || return 0
   grep -q '^DNS_DOCKER_IP=172\.16\.60\.1$' "$INV" || return 0
+  grep -q '^WEB_HTTP_SERVICE=' "$INV" || return 0
+  grep -q '^WEB_DOCROOT=' "$INV" || return 0
+  grep -q '^YANDEX_BROWSER_PACKAGE=' "$INV" || return 0
+  grep -q '^YANDEX_BROWSER_BIN=' "$INV" || return 0
+  grep -q '^ADDITIONAL_MOUNT=' "$INV" || return 0
+  grep -q '^AD_NETBIOS_DOMAIN=' "$INV" || return 0
   return 1
+}
+
+set_module2_defaults() {
+  : "${DOMAIN:=au-team.irpo}"
+  : "${REALM:=AU-TEAM.IRPO}"
+  : "${WEB_DOMAIN:=web.au-team.irpo}"
+  : "${DOCKER_DOMAIN:=docker.au-team.irpo}"
+  : "${AD_NETBIOS_DOMAIN:=AU-TEAM}"
+  : "${SAMBA_DOMAIN:=$AD_NETBIOS_DOMAIN}"
+  : "${SAMBA_REALM:=$REALM}"
+  : "${SAMBA_ADMIN_USER:=Administrator}"
+  : "${SAMBA_ADMIN_PASS:=${DOMAIN_PASS:-P@ssw0rd}}"
+  : "${SAMBA_DC_HOST:=br-srv.$DOMAIN}"
+  : "${SAMBA_DC_IP:=${BR_SRV_ADDR:-192.168.10.2}}"
+  : "${SAMBA_GROUP:=${DOMAIN_GROUP:-hq}}"
+  : "${SAMBA_USER_PREFIX:=${DOMAIN_USERS_PREFIX:-hquser}}"
+  : "${SAMBA_USERS_COUNT:=${DOMAIN_USERS_COUNT:-5}}"
+  : "${AD_USERS_CSV:=/mnt/additional/Users.csv}"
+  : "${ADDITIONAL_MOUNT:=/mnt/additional}"
+  : "${ADDITIONAL_CDROM_1:=/dev/sr0}"
+  : "${ADDITIONAL_CDROM_2:=/dev/cdrom}"
+  : "${RAID_DEVICE:=/dev/md3}"
+  : "${RAID_LEVEL:=5}"
+  : "${RAID_DISK_COUNT:=3}"
+  : "${RAID_DISK_SIZE_GB:=1}"
+  : "${RAID_MOUNT:=/raid}"
+  : "${NFS_DIR:=/raid/nfs}"
+  : "${NFS_EXPORT_DIR:=$NFS_DIR}"
+  : "${NFS_CLIENT_MOUNT:=/mnt/nfs}"
+  : "${NFS_MOUNT_DIR:=$NFS_CLIENT_MOUNT}"
+  : "${NFS_SERVER:=${HQ_SRV_ADDR:-192.168.113.2}}"
+  : "${NFS_CLIENT_NET:=192.168.213.0/27}"
+  : "${NTP_SERVER_ROLE:=ISP}"
+  : "${NTP_STRATUM:=8}"
+  : "${ANSIBLE_WORKDIR:=/etc/ansible}"
+  : "${ANSIBLE_REPORT_DIR:=/etc/ansible/PC-INFO}"
+  : "${ANSIBLE_PLAYBOOK_SRC:=/mnt/additional/playbook/get_hostname_address.yml}"
+  : "${DOCKER_APP_IMAGE:=site:latest}"
+  : "${DOCKER_DB_IMAGE:=postgres:15-alpine}"
+  : "${DOCKER_NETWORK:=examnet}"
+  : "${DOCKER_APP_CONTAINER:=site}"
+  : "${DOCKER_SITE_CONTAINER:=$DOCKER_APP_CONTAINER}"
+  : "${DOCKER_DB_CONTAINER:=db}"
+  : "${DOCKER_DB_NAME:=testdb3}"
+  : "${DOCKER_DB_USER:=test3c}"
+  : "${DOCKER_DB_PASS:=P@ssw0rd}"
+  : "${DOCKER_APP_PORT:=8083}"
+  : "${DOCKER_CONTAINER_PORT:=8000}"
+  : "${DOCKER_SITE_IMAGE:=$DOCKER_APP_IMAGE}"
+  : "${APP_PORT:=$DOCKER_APP_PORT}"
+  : "${WEB_DB_NAME:=webdb}"
+  : "${WEB_DB_USER:=web3}"
+  : "${WEB_DB_PASS:=P@ssw0rd}"
+  : "${WEB_DOCROOT:=/var/www/html}"
+  : "${WEB_ROOT:=$WEB_DOCROOT}"
+  : "${WEB_HTTP_SERVICE:=httpd2}"
+  : "${WEB_DB_SERVICE:=mariadb}"
+  : "${WEB_HTTP_PORT:=80}"
+  : "${NGINX_SERVICE:=nginx}"
+  : "${BASIC_AUTH_USER:=Kazimirc}"
+  : "${BASIC_AUTH_PASS:=P@ssw0rd}"
+  : "${BASIC_AUTH_FILE:=/etc/nginx/.htpasswd}"
+  : "${YANDEX_BROWSER_PACKAGE:=yandex-browser-stable}"
+  : "${YANDEX_BROWSER_PREINSTALL_PACKAGE:=yandex-browser-preinstall}"
+  : "${YANDEX_BROWSER_BIN:=/usr/bin/yandex-browser-stable}"
+  : "${DOMAIN_USERS_PREFIX:=hquser}"
+  : "${DOMAIN_USERS_SUFFIX:=}"
+  : "${DOMAIN_USERS_COUNT:=5}"
+  : "${DOMAIN_GROUP:=hq}"
+  : "${DOMAIN_PASS:=P@ssw0rd}"
+  : "${NET_ADMIN_USER:=${ROUTER_ADMIN_USER:-net_admin}}"
+  : "${NET_ADMIN_PASS:=${ROUTER_ADMIN_PASS:-P@ssw0rd}}"
+  : "${SSH_USER:=sshuser}"
+  : "${SSH_PASS:=P@ssw0rd}"
+  : "${SSH_PORT:=2013}"
+  : "${DNS_WEB_IP:=172.16.50.1}"
+  : "${DNS_DOCKER_IP:=172.16.60.1}"
 }
 
 refresh_inventory_from_raw() {
@@ -72,6 +155,7 @@ load_inventory() {
   if [[ -f "$INV" ]]; then
     # shellcheck disable=SC1090
     source "$INV"
+    set_module2_defaults
     HQ_SRV_PVE_NET="${HQ_SRV_PVE_NET:-net6}"
     HQ_CLI_PVE_NET="${HQ_CLI_PVE_NET:-net6}"
     INVENTORY_LOADED=1
@@ -1163,13 +1247,18 @@ show_module2_status() {
     "web.au-team.irpo auth did not return 401 without credentials and 200/content with credentials" \
     "check $BASIC_AUTH_FILE permissions and nginx proxy_pass"
 
+  module2_guest_check "Samba DNS web/docker records" "$BR_SRV_VMID" \
+    "host $WEB_DOMAIN 127.0.0.1 | grep -q '$DNS_WEB_IP' && host $DOCKER_DOMAIN 127.0.0.1 | grep -q '$DNS_DOCKER_IP'" \
+    "Samba DNS does not resolve web/docker to ISP addresses" \
+    "run: bash run.sh run module2-samba"
+
   module2_guest_check "Nginx and Basic Auth from HQ-CLI" "$HQ_CLI_VMID" \
-    "curl -s -o /tmp/module2-web-noauth -w '%{http_code}' http://$WEB_DOMAIN | grep -q '^401$' && curl -fsSL -u '$BASIC_AUTH_USER:$BASIC_AUTH_PASS' http://$WEB_DOMAIN | grep -qi '<html\\|php\\|database\\|employee' && curl -fsSL http://$DOCKER_DOMAIN | grep -qi '<html\\|uvicorn\\|student'" \
+    "(getent hosts $WEB_DOMAIN || host $WEB_DOMAIN) | grep -q '$DNS_WEB_IP' && (getent hosts $DOCKER_DOMAIN || host $DOCKER_DOMAIN) | grep -q '$DNS_DOCKER_IP' && curl -s -o /tmp/module2-web-noauth -w '%{http_code}' http://$WEB_DOMAIN | grep -q '^401$' && curl -fsSL -u '$BASIC_AUTH_USER:$BASIC_AUTH_PASS' http://$WEB_DOMAIN | grep -qi '<html\\|php\\|database\\|employee' && curl -fsSL http://$DOCKER_DOMAIN | grep -qi '<html\\|uvicorn\\|student'" \
     "HQ-CLI reverse proxy checks for web/docker domains failed" \
-    "check HQ-CLI DNS, nginx on ISP, DNAT, and basic auth"
+    "check HQ-CLI DNS after domain join, Samba DNS web/docker records, nginx on ISP, DNAT, and basic auth"
 
   module2_guest_check "Yandex Browser" "$HQ_CLI_VMID" \
-    "rpm -qa | grep -q '$YANDEX_BROWSER_PACKAGE' && test -x /usr/bin/yandex-browser-stable && test -f /usr/share/applications/yandex-browser.desktop && /usr/bin/yandex-browser-stable --version | grep -qi Yandex" \
+    "rpm -qa | grep -q '$YANDEX_BROWSER_PACKAGE' && test -x '$YANDEX_BROWSER_BIN' && test -f /usr/share/applications/yandex-browser.desktop && '$YANDEX_BROWSER_BIN' --version | grep -qi Yandex" \
     "Yandex Browser package/binary/desktop/version check failed" \
     "run: bash run.sh run module2-browser"
 
