@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DEFAULT_RAW_URL="https://raw.githubusercontent.com/Arsen11y/PVE/main/proxmox-remote"
+DEFAULT_RAW_URL="https://raw.githubusercontent.com/Arsen11y/pve/main/proxmox-remote"
 DE_RAW_URL="${DE_RAW_URL:-$DEFAULT_RAW_URL}"
 INV="${DE_INVENTORY:-/root/de-inventory.env}"
 REQUEST_COMMAND="${1:-}"
@@ -12,7 +12,50 @@ GUEST_EXEC_POLL_INTERVAL="${GUEST_EXEC_POLL_INTERVAL:-5}"
 GUEST_EXEC_WAIT_TIMEOUT="${GUEST_EXEC_WAIT_TIMEOUT:-900}"
 INVENTORY_LOADED=0
 
+inventory_needs_refresh() {
+  [[ ! -f "$INV" ]] && return 0
+  grep -q '^VLAN_SRV=113$' "$INV" || return 0
+  grep -q '^VLAN_CLI=213$' "$INV" || return 0
+  grep -q '^VLAN_MGMT=813$' "$INV" || return 0
+  grep -q '^SSH_PORT=2013$' "$INV" || return 0
+  grep -q '^SSH_UID=2013$' "$INV" || return 0
+  grep -q '^ISP_HQ_IP=172\.16\.50\.1/28$' "$INV" || return 0
+  grep -q '^ISP_HQ_ADDR=172\.16\.50\.1$' "$INV" || return 0
+  grep -q '^HQ_RTR_WAN_IP=172\.16\.50\.2/28$' "$INV" || return 0
+  grep -q '^HQ_RTR_WAN_ADDR=172\.16\.50\.2$' "$INV" || return 0
+  grep -q '^ISP_BR_IP=172\.16\.60\.1/28$' "$INV" || return 0
+  grep -q '^ISP_BR_ADDR=172\.16\.60\.1$' "$INV" || return 0
+  grep -q '^BR_RTR_WAN_IP=172\.16\.60\.2/28$' "$INV" || return 0
+  grep -q '^BR_RTR_WAN_ADDR=172\.16\.60\.2$' "$INV" || return 0
+  grep -q '^HQ_SRV_NET=192\.168\.113\.0/27$' "$INV" || return 0
+  grep -q '^HQ_SRV_ADDR=192\.168\.113\.2$' "$INV" || return 0
+  grep -q '^HQ_RTR_SRV_ADDR=192\.168\.113\.1$' "$INV" || return 0
+  grep -q '^HQ_CLI_NET=192\.168\.213\.0/27$' "$INV" || return 0
+  grep -q '^HQ_RTR_CLI_ADDR=192\.168\.213\.1$' "$INV" || return 0
+  grep -q '^HQ_CLI_DHCP_START=192\.168\.213\.10$' "$INV" || return 0
+  grep -q '^HQ_CLI_DHCP_END=192\.168\.213\.20$' "$INV" || return 0
+  grep -q '^HQ_CLI_ADDR=192\.168\.213\.10$' "$INV" || return 0
+  grep -q '^BR_SRV_ADDR=192\.168\.10\.2$' "$INV" || return 0
+  grep -q '^BR_RTR_LAN_ADDR=192\.168\.10\.1$' "$INV" || return 0
+  grep -q '^DNS_FORWARDER_1=77\.88\.8\.7$' "$INV" || return 0
+  grep -q '^DNS_FORWARDER_2=77\.88\.8\.3$' "$INV" || return 0
+  return 1
+}
+
+refresh_inventory_from_raw() {
+  local action="$1"
+  echo "[STEP] ${action} inventory: $INV"
+  mkdir -p "$(dirname "$INV")"
+  curl -fsSL "$DE_RAW_URL/inventory.example.env" > "${INV}.tmp"
+  mv "${INV}.tmp" "$INV"
+  echo "[OK] inventory loaded from $DE_RAW_URL/inventory.example.env"
+}
+
 load_inventory() {
+  if inventory_needs_refresh; then
+    refresh_inventory_from_raw "refresh"
+  fi
+
   if [[ -f "$INV" ]]; then
     # shellcheck disable=SC1090
     source "$INV"
@@ -668,15 +711,16 @@ prepare_vlans() {
 }
 
 ensure_demo_inventory() {
-  if [[ -f "$INV" ]]; then
-    echo "[OK] inventory exists: $INV"
+  if inventory_needs_refresh; then
+    refresh_inventory_from_raw "refresh"
+    INVENTORY_LOADED=0
     return 0
   fi
 
-  echo "[STEP] create inventory: $INV"
-  mkdir -p "$(dirname "$INV")"
-  curl -fsSL "$DE_RAW_URL/inventory.example.env" > "$INV"
-  echo "[OK] inventory created from $DE_RAW_URL/inventory.example.env"
+  if [[ -f "$INV" ]]; then
+    echo "[OK] inventory is current: $INV"
+    return 0
+  fi
 }
 
 check_proxmox_internet() {
@@ -897,17 +941,17 @@ MODULE 2 PLANNED STEPS
 [PLAN] 00-prereq.sh
   Verify Module 1 baseline, DNS, qemu-guest-agent, VLANs $VLAN_SRV/$VLAN_CLI/$VLAN_MGMT, and SSH $SSH_PORT.
 [PLAN] 01-hq-srv-storage.sh
-  RAID${RAID_LEVEL:-5} from ${RAID_DISK_COUNT:-3} x ${RAID_DISK_SIZE_GB:-1}GB disks on HQ-SRV, ${RAID_DEVICE:-/dev/md3}, mdadm.conf, ext4, mount ${RAID_MOUNT:-/raid}, NFS ${NFS_DIR:-/raid/nfs}, HQ-CLI automount ${NFS_CLIENT_MOUNT:-/mnt/nfs}.
+  RAID${RAID_LEVEL:-5} from ${RAID_DISK_COUNT:-3} x ${RAID_DISK_SIZE_GB:-1}GB disks on HQ-SRV, ${RAID_DEVICE:-/dev/md0}, mdadm.conf, ext4, mount ${RAID_MOUNT:-/raid5}, NFS ${NFS_DIR:-/raid5/nfs}, HQ-CLI automount ${NFS_CLIENT_MOUNT:-/mnt/nfs}.
 [PLAN] 02-br-srv-domain.sh
-  Samba DC on BR-SRV for ${DOMAIN:-au-team.irpo}/${REALM:-AU-TEAM.IRPO}, users ${DOMAIN_USERS_PREFIX:-hquser}1-${DOMAIN_USERS_PREFIX:-hquser}${DOMAIN_USERS_COUNT:-5}, group ${DOMAIN_GROUP:-hq}, sudo only cat/grep/id, HQ-CLI domain join.
+  Samba DC on BR-SRV for ${DOMAIN:-au-team.irpo}/${REALM:-AU-TEAM.IRPO}, users ${DOMAIN_USER_TEMPLATE:-user{N}hq} from ${USERS_CSV_PATH:-/opt/users.csv}, group ${DOMAIN_GROUP:-hq}, sudo only cat/grep/id, HQ-CLI domain join.
 [PLAN] 03-time-ansible.sh
   Chrony server role ${NTP_SERVER_ROLE:-ISP}, stratum ${NTP_STRATUM:-8}, clients HQ-SRV/HQ-CLI/BR-RTR/BR-SRV; Ansible on BR-SRV in ${ANSIBLE_WORKDIR:-/etc/ansible}, ansible all -m ping; optional ${HQ_CLI_BROWSER:-Yandex Browser} on HQ-CLI.
 [PLAN] 04-web-docker.sh
-  Docker on BR-SRV: images ${DOCKER_IMAGE_APP:-site_latest}/${DOCKER_IMAGE_DB:-postgresql_latest}, containers ${DOCKER_APP_CONTAINER:-site}/${DOCKER_DB_CONTAINER:-db}, DB ${DOCKER_DB_NAME:-testdb3}, user ${DOCKER_DB_USER:-test3c}, port ${DOCKER_APP_PORT:-8083}; Apache + MariaDB on HQ-SRV: DB ${WEB_DB_NAME:-webdb}, user ${WEB_DB_USER:-web3}, import dump.sql, copy index.php/images.
+  Docker on BR-SRV: ${DOCKER_COMPOSE_FILE:-wiki.yml}, services ${DOCKER_APP_CONTAINER:-wiki}/${DOCKER_DB_CONTAINER:-mariadb}, DB ${DOCKER_DB_NAME:-mediawiki}, user ${DOCKER_DB_USER:-wiki}, port ${DOCKER_APP_PORT:-8080}; Moodle on HQ-SRV: DB ${WEB_DB_NAME:-moodledb}, user ${WEB_DB_USER:-moodle}, admin password from inventory.
 [PLAN] 05-proxy-dnat.sh
-  DNAT ${DOCKER_APP_PORT:-8083}: HQ-RTR -> HQ-SRV web, BR-RTR -> BR-SRV docker; DNAT ${SSH_PORT:-2013}: HQ-RTR -> HQ-SRV SSH, BR-RTR -> BR-SRV SSH; nginx reverse proxy on ISP: ${WEB_DOMAIN:-web.au-team.irpo} -> HQ-SRV web, ${DOCKER_DOMAIN:-docker.au-team.irpo} -> BR-SRV site.
+  DNAT ${DNAT_PORT:-2024}: HQ-RTR -> ${DNAT_HQ_TARGET:-192.168.113.2:2024}, BR-RTR -> ${DNAT_BR_TARGET:-192.168.10.2:2024}; nginx reverse proxy on ${REVERSE_PROXY_HOST:-hq-rtr.au-team.irpo}: ${WEB_DOMAIN:-moodle.au-team.irpo} -> HQ-SRV Moodle, ${DOCKER_DOMAIN:-wiki.au-team.irpo} -> BR-SRV MediaWiki.
 [PLAN] 06-security-firewall.sh
-  Basic auth on ISP for ${WEB_DOMAIN:-web.au-team.irpo}: ${BASIC_AUTH_USER:-Kazimirc}, file ${BASIC_AUTH_FILE:-/etc/nginx/.htpasswd}; firewall rules after DNAT/proxy are confirmed.
+  Basic auth for ${WEB_DOMAIN:-moodle.au-team.irpo}: ${BASIC_AUTH_USER:-Kazimirc}, file ${BASIC_AUTH_FILE:-/etc/nginx/.htpasswd}; protected tunnel/firewall rules only after exact requirements are confirmed.
 [PLAN] 07-logging-monitoring-backup.sh
   CUPS PDF, rsyslog, monitoring ${MON_DOMAIN:-mon.au-team.irpo}, HQ-SRV backup ${BACKUP_DIR:-/backup}.
 
