@@ -53,7 +53,7 @@ hostname BR-RTR
 log syslog informational
 service integrated-vtysh-config
 
-interface gre1
+interface $GRE_NAME
  ip ospf network point-to-point
  ip ospf mtu-ignore
 
@@ -73,14 +73,14 @@ After=network.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStartPre=/bin/sh -c 'ip link set gre1 down 2>/dev/null || true'
-ExecStartPre=/bin/sh -c 'ip tunnel del gre1 2>/dev/null || true'
-ExecStart=/bin/sh -c 'ip tunnel add gre1 mode gre local $BR_RTR_WAN_ADDR remote $HQ_RTR_WAN_ADDR ttl 255'
-ExecStart=/bin/sh -c 'ip addr add 10.10.10.2/30 dev gre1'
-ExecStart=/bin/sh -c 'ip link set gre1 up multicast on'
-ExecStart=/bin/sh -c 'ip route replace 10.10.10.0/30 dev gre1'
-ExecStart=/bin/sh -c 'ip route replace 224.0.0.0/4 dev gre1'
-ExecStop=/bin/sh -c 'ip link set gre1 down 2>/dev/null || true; ip tunnel del gre1 2>/dev/null || true'
+ExecStartPre=/bin/sh -c 'ip link set $GRE_NAME down 2>/dev/null || true'
+ExecStartPre=/bin/sh -c 'ip tunnel del $GRE_NAME 2>/dev/null || true'
+ExecStart=/bin/sh -c 'ip tunnel add $GRE_NAME mode gre local $BR_RTR_WAN_ADDR remote $HQ_RTR_WAN_ADDR ttl 255'
+ExecStart=/bin/sh -c 'ip addr add $GRE_BR_IP dev $GRE_NAME'
+ExecStart=/bin/sh -c 'ip link set $GRE_NAME up multicast on'
+ExecStart=/bin/sh -c 'ip route replace 10.10.10.0/30 dev $GRE_NAME'
+ExecStart=/bin/sh -c 'ip route replace 224.0.0.0/4 dev $GRE_NAME'
+ExecStop=/bin/sh -c 'ip link set $GRE_NAME down 2>/dev/null || true; ip tunnel del $GRE_NAME 2>/dev/null || true'
 
 [Install]
 WantedBy=multi-user.target
@@ -97,7 +97,7 @@ systemctl enable frr
 systemctl restart frr
 
 ip -br a || true
-ip tunnel show gre1 || true
-ping -c 4 10.10.10.1 || true
+ip tunnel show "$GRE_NAME" || true
+ping -c 4 "$GRE_HQ_ADDR" || true
 vtysh -c 'show ip ospf neighbor' || true
 vtysh -c 'show ip route ospf' || true

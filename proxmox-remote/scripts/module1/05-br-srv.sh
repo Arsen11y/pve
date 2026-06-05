@@ -4,6 +4,7 @@ write_eth_static "$BR_SRV_IF" "$BR_SRV_IP" "$BR_SRV_GW"
 echo "search $DOMAIN" > "/etc/net/ifaces/$BR_SRV_IF/resolv.conf"
 echo "nameserver $HQ_SRV_ADDR" >> "/etc/net/ifaces/$BR_SRV_IF/resolv.conf"
 restart_network_safe
+ip route replace default via "$BR_RTR_LAN_ADDR" dev "$BR_SRV_IF" || true
 cat > /etc/resolv.conf <<EOFINNER
 search $DOMAIN
 nameserver $HQ_SRV_ADDR

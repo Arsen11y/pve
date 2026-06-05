@@ -15,18 +15,28 @@ last_octet() {
   printf '%s\n' "${ip##*.}"
 }
 
-write_eth_static "$HQ_SRV_IF" "$HQ_SRV_IP" "$HQ_SRV_GW"
+write_eth_static "$HQ_SRV_IF" "$HQ_SRV_IP" "$HQ_RTR_SRV_ADDR"
 cat > "/etc/net/ifaces/$HQ_SRV_IF/resolv.conf" <<EOFINNER
 nameserver $DNS_FORWARDER_1
 nameserver $DNS_FORWARDER_2
-nameserver 8.8.8.8
+nameserver $DNS_FORWARDER_FALLBACK
 EOFINNER
 restart_network_safe
+ip route replace default via "$HQ_RTR_SRV_ADDR" dev "$HQ_SRV_IF" || true
 cat > /etc/resolv.conf <<EOFINNER
 nameserver $DNS_FORWARDER_1
 nameserver $DNS_FORWARDER_2
-nameserver 8.8.8.8
+nameserver $DNS_FORWARDER_FALLBACK
 EOFINNER
+
+grep -q '^62\.152\.55\.238[[:space:]]ftp\.altlinux\.org$' /etc/hosts || echo '62.152.55.238 ftp.altlinux.org' >> /etc/hosts
+
+ip -br a || true
+ip route || true
+cat /etc/resolv.conf || true
+getent hosts ftp.altlinux.org || true
+ping -c 4 "$HQ_RTR_SRV_ADDR" || true
+ping -c 4 "$DNS_FORWARDER_FALLBACK" || true
 
 apt-get update
 apt-get install -y bind bind-utils sudo openssh-server tzdata
@@ -72,7 +82,7 @@ options {
     allow-query { any; };
     recursion yes;
     allow-recursion { any; };
-    forwarders { $DNS_FORWARDER_1; $DNS_FORWARDER_2; };
+    forwarders { $DNS_FORWARDER_1; $DNS_FORWARDER_2; $DNS_FORWARDER_FALLBACK; };
     dnssec-validation no;
 };
 
@@ -100,14 +110,14 @@ EOFINNER
 cat > "/var/lib/bind/etc/zones/$DOMAIN.zone" <<EOFINNER
 \$TTL 3600
 @       IN SOA  hq-srv.$DOMAIN. admin.$DOMAIN. (
-                2026060501 3600 900 604800 86400 )
+                2025010101 3600 900 604800 86400 )
         IN NS   hq-srv.$DOMAIN.
 
-hq-srv  IN A    $HQ_SRV_ADDR
-hq-rtr  IN A    $HQ_RTR_SRV_ADDR
-hq-cli  IN A    $HQ_CLI_EXPECTED_IP
-br-rtr  IN A    $BR_RTR_LAN_ADDR
-br-srv  IN A    $BR_SRV_ADDR
+hq-srv  IN A    $DNS_HQ_SRV_IP
+hq-rtr  IN A    $DNS_HQ_RTR_IP
+hq-cli  IN A    $DNS_HQ_CLI_IP
+br-rtr  IN A    $DNS_BR_RTR_IP
+br-srv  IN A    $DNS_BR_SRV_IP
 web     IN A    $DNS_WEB_IP
 docker  IN A    $DNS_DOCKER_IP
 EOFINNER
@@ -115,30 +125,30 @@ EOFINNER
 cat > "/var/lib/bind/etc/zones/$HQ_SRV_REV_ZONE.zone" <<EOFINNER
 \$TTL 3600
 @       IN SOA  hq-srv.$DOMAIN. admin.$DOMAIN. (
-                2026060501 3600 900 604800 86400 )
+                2025010101 3600 900 604800 86400 )
         IN NS   hq-srv.$DOMAIN.
 
-$(last_octet "$HQ_RTR_SRV_ADDR")       IN PTR  hq-rtr.$DOMAIN.
-$(last_octet "$HQ_SRV_ADDR")       IN PTR  hq-srv.$DOMAIN.
+$(last_octet "$DNS_HQ_RTR_IP")       IN PTR  hq-rtr.$DOMAIN.
+$(last_octet "$DNS_HQ_SRV_IP")       IN PTR  hq-srv.$DOMAIN.
 EOFINNER
 
 cat > "/var/lib/bind/etc/zones/$HQ_CLI_REV_ZONE.zone" <<EOFINNER
 \$TTL 3600
 @       IN SOA  hq-srv.$DOMAIN. admin.$DOMAIN. (
-                2026060501 3600 900 604800 86400 )
+                2025010101 3600 900 604800 86400 )
         IN NS   hq-srv.$DOMAIN.
 
-$(last_octet "$HQ_CLI_EXPECTED_IP")      IN PTR  hq-cli.$DOMAIN.
+$(last_octet "$DNS_HQ_CLI_IP")      IN PTR  hq-cli.$DOMAIN.
 EOFINNER
 
 cat > "/var/lib/bind/etc/zones/$BR_SRV_REV_ZONE.zone" <<EOFINNER
 \$TTL 3600
 @       IN SOA  hq-srv.$DOMAIN. admin.$DOMAIN. (
-                2026060501 3600 900 604800 86400 )
+                2025010101 3600 900 604800 86400 )
         IN NS   hq-srv.$DOMAIN.
 
-$(last_octet "$BR_RTR_LAN_ADDR")       IN PTR  br-rtr.$DOMAIN.
-$(last_octet "$BR_SRV_ADDR")       IN PTR  br-srv.$DOMAIN.
+$(last_octet "$DNS_BR_RTR_IP")       IN PTR  br-rtr.$DOMAIN.
+$(last_octet "$DNS_BR_SRV_IP")       IN PTR  br-srv.$DOMAIN.
 EOFINNER
 
 chown -R named:named /var/lib/bind 2>/dev/null || true
