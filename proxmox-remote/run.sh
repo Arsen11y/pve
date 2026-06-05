@@ -117,6 +117,13 @@ Commands:
   run module2-nfs          Configure NFS server on HQ-SRV and mount on HQ-CLI
   run module2-chrony       Configure ISP chrony server and clients
   run module2-ansible      Configure Ansible control node on BR-SRV
+  run module2-docker       Configure Docker app on BR-SRV
+  run module2-web          Configure Apache/MariaDB/PHP web on HQ-SRV
+  run module2-dnat         Configure DNAT on HQ-RTR and BR-RTR
+  run module2-nginx        Configure nginx reverse proxy and Basic Auth on ISP
+  run module2-browser      Install Yandex Browser on HQ-CLI
+  run module2-samba        Configure Samba AD DC on BR-SRV and join HQ-CLI
+  run module2              Run all Module 2 blocks in safe order and check
 
 Targets:
   isp
@@ -577,7 +584,50 @@ run_module2_chrony() {
 }
 
 run_module2_ansible() {
-  run_module_script "module2-ansible" br-srv "scripts/module2/04-br-srv-ansible.sh"
+  run_module_script "module2-ansible hq-cli ssh" hq-cli "scripts/module2/04-br-srv-ansible.sh" || return 1
+  run_module_script "module2-ansible hq-rtr ssh" hq-rtr "scripts/module2/04-br-srv-ansible.sh" || return 1
+  run_module_script "module2-ansible br-rtr ssh" br-rtr "scripts/module2/04-br-srv-ansible.sh" || return 1
+  run_module_script "module2-ansible controller" br-srv "scripts/module2/04-br-srv-ansible.sh" || return 1
+}
+
+run_module2_docker() {
+  run_module_script "module2-docker" br-srv "scripts/module2/04-web-docker.sh"
+}
+
+run_module2_web() {
+  run_module_script "module2-web" hq-srv "scripts/module2/05-hq-srv-web.sh"
+}
+
+run_module2_dnat() {
+  run_module_script "module2-dnat hq-rtr" hq-rtr "scripts/module2/05-proxy-dnat.sh" || return 1
+  run_module_script "module2-dnat br-rtr" br-rtr "scripts/module2/05-proxy-dnat.sh" || return 1
+}
+
+run_module2_nginx() {
+  run_module_script "module2-nginx" isp "scripts/module2/06-security-firewall.sh"
+}
+
+run_module2_browser() {
+  run_module_script "module2-browser" hq-cli "scripts/module2/08-hq-cli-browser.sh"
+}
+
+run_module2_samba() {
+  run_module_script "module2-samba dc" br-srv "scripts/module2/02-br-srv-domain.sh" || return 1
+  run_module_script "module2-samba join" hq-cli "scripts/module2/02-br-srv-domain.sh" || return 1
+}
+
+run_module2_all() {
+  run_module2_storage || return 1
+  run_module2_nfs || return 1
+  run_module2_chrony || return 1
+  run_module2_ansible || return 1
+  run_module2_docker || return 1
+  run_module2_web || return 1
+  run_module2_dnat || return 1
+  run_module2_nginx || return 1
+  run_module2_browser || return 1
+  run_module2_samba || return 1
+  show_module2_status
 }
 
 check_all() {
@@ -1016,6 +1066,7 @@ show_module2_prereq() {
   fi
 }
 
+
 show_module2_status() {
   if [[ "$INVENTORY_LOADED" -ne 1 ]]; then
     load_inventory
@@ -1035,14 +1086,14 @@ show_module2_status() {
     module2_fail "Module 1 prerequisite" "Module 1 prereq failed" "Run first: curl -fsSL https://raw.githubusercontent.com/Arsen11y/pve/main/m1.sh | bash"
   fi
 
-  module2_guest_check "HQ-SRV RAID5 $RAID_DEVICE mounted on $RAID_MOUNT" "$HQ_SRV_VMID" \
-    "test -e $RAID_DEVICE && findmnt -n $RAID_MOUNT >/dev/null && findmnt -n -o FSTYPE $RAID_MOUNT | grep -q '^ext4$' && test -f /etc/mdadm.conf && grep -q '${RAID_DEVICE##/dev/}' /proc/mdstat" \
-    "$RAID_DEVICE is missing, $RAID_MOUNT is not mounted as ext4, or /etc/mdadm.conf is missing" \
+  module2_guest_check "RAID5 $RAID_DEVICE mounted on $RAID_MOUNT" "$HQ_SRV_VMID" \
+    "test -e $RAID_DEVICE && grep -q '${RAID_DEVICE##/dev/}' /proc/mdstat && grep -q '\\[3/3\\].*\\[UUU\\]' /proc/mdstat && mdadm --detail $RAID_DEVICE | grep -q 'Raid Level : raid5' && findmnt -n $RAID_MOUNT >/dev/null && findmnt -n -o FSTYPE $RAID_MOUNT | grep -q '^ext4$' && grep -q '$RAID_MOUNT' /etc/fstab && test -f /etc/mdadm.conf" \
+    "$RAID_DEVICE is missing, degraded, not raid5, or $RAID_MOUNT is not mounted as ext4" \
     "run: bash run.sh run module2-storage"
 
-  module2_guest_check "HQ-SRV NFS export $NFS_DIR" "$HQ_SRV_VMID" \
-    "test -d $NFS_DIR && exportfs -v | grep -q '$NFS_DIR' && exportfs -v | grep -q '${HQ_CLI_NET%/*}'" \
-    "$NFS_DIR is not exported to $HQ_CLI_NET" \
+  module2_guest_check "NFS export and HQ-CLI mount" "$HQ_SRV_VMID" \
+    "test -d $NFS_DIR && exportfs -v | grep -q '$NFS_DIR' && exportfs -v | grep -q '${HQ_CLI_NET%/*}' && test -f $NFS_DIR/module2-test-from-hq-cli.txt" \
+    "$NFS_DIR is not exported to $HQ_CLI_NET or HQ-CLI test file is missing" \
     "run: bash run.sh run module2-nfs"
 
   module2_guest_check "HQ-CLI NFS mount $NFS_CLIENT_MOUNT" "$HQ_CLI_VMID" \
@@ -1050,45 +1101,103 @@ show_module2_status() {
     "$NFS_CLIENT_MOUNT is not mounted or is not writable from HQ-CLI" \
     "check /etc/fstab on HQ-CLI and exportfs -v on HQ-SRV"
 
-  module2_guest_check "ISP chrony server" "$ISP_VMID" \
-    "(systemctl is-active --quiet chronyd || systemctl is-active --quiet chrony) && (command -v chronyc >/dev/null 2>&1 && chronyc tracking >/dev/null || true)" \
-    "chrony service is not active on ISP" \
+  module2_guest_check "Chrony time sync" "$ISP_VMID" \
+    "(systemctl is-active --quiet chronyd || systemctl is-active --quiet chrony) && command -v chronyc >/dev/null 2>&1 && chronyc tracking | grep -q 'Stratum[[:space:]]*:[[:space:]]*$NTP_STRATUM'" \
+    "chrony service is not active on ISP or stratum is not $NTP_STRATUM" \
     "run: bash run.sh run module2-chrony"
 
   module2_guest_check "Chrony client HQ-SRV" "$HQ_SRV_VMID" \
-    "(systemctl is-active --quiet chronyd || systemctl is-active --quiet chrony) && (command -v chronyc >/dev/null 2>&1 && chronyc sources >/dev/null || true)" \
+    "(systemctl is-active --quiet chronyd || systemctl is-active --quiet chrony) && command -v chronyc >/dev/null 2>&1 && (chronyc sources | grep -q '$ISP_HQ_ADDR' || chronyc tracking | grep -q 'Reference ID')" \
     "chrony client is not active on HQ-SRV" \
     "run: bash run.sh run module2-chrony"
   module2_guest_check "Chrony client HQ-CLI" "$HQ_CLI_VMID" \
-    "(systemctl is-active --quiet chronyd || systemctl is-active --quiet chrony) && (command -v chronyc >/dev/null 2>&1 && chronyc sources >/dev/null || true)" \
+    "(systemctl is-active --quiet chronyd || systemctl is-active --quiet chrony) && command -v chronyc >/dev/null 2>&1 && (chronyc sources | grep -q '$ISP_HQ_ADDR' || chronyc tracking | grep -q 'Reference ID')" \
     "chrony client is not active on HQ-CLI" \
     "run: bash run.sh run module2-chrony"
   module2_guest_check "Chrony client BR-RTR" "$BR_RTR_VMID" \
-    "(systemctl is-active --quiet chronyd || systemctl is-active --quiet chrony) && (command -v chronyc >/dev/null 2>&1 && chronyc sources >/dev/null || true)" \
+    "(systemctl is-active --quiet chronyd || systemctl is-active --quiet chrony) && command -v chronyc >/dev/null 2>&1 && (chronyc sources | grep -q '$ISP_BR_ADDR\\|_gateway' || chronyc tracking | grep -q 'Reference ID')" \
     "chrony client is not active on BR-RTR" \
     "run: bash run.sh run module2-chrony"
   module2_guest_check "Chrony client BR-SRV" "$BR_SRV_VMID" \
-    "(systemctl is-active --quiet chronyd || systemctl is-active --quiet chrony) && (command -v chronyc >/dev/null 2>&1 && chronyc sources >/dev/null || true)" \
+    "(systemctl is-active --quiet chronyd || systemctl is-active --quiet chrony) && command -v chronyc >/dev/null 2>&1 && (chronyc sources | grep -q '$ISP_BR_ADDR\\|_gateway' || chronyc tracking | grep -q 'Reference ID')" \
     "chrony client is not active on BR-SRV" \
     "run: bash run.sh run module2-chrony"
 
-  module2_guest_check "BR-SRV Ansible inventory" "$BR_SRV_VMID" \
-    "test -f $ANSIBLE_WORKDIR/hosts && command -v ansible >/dev/null 2>&1 && ansible --version >/dev/null" \
-    "Ansible inventory or ansible binary is missing on BR-SRV" \
+  module2_guest_check "Ansible inventory and ping" "$BR_SRV_VMID" \
+    "test -f $ANSIBLE_WORKDIR/hosts && command -v ansible >/dev/null 2>&1 && ansible --version >/dev/null && cd $ANSIBLE_WORKDIR && ansible all -m ping | tee /tmp/module2-ansible-ping.txt && grep -q 'hq-srv.*SUCCESS' /tmp/module2-ansible-ping.txt && grep -q 'hq-cli.*SUCCESS' /tmp/module2-ansible-ping.txt && grep -q 'hq-rtr.*SUCCESS' /tmp/module2-ansible-ping.txt && grep -q 'br-rtr.*SUCCESS' /tmp/module2-ansible-ping.txt" \
+    "ansible inventory is missing or ansible ping did not return SUCCESS for all expected hosts" \
     "run: bash run.sh run module2-ansible"
 
-  module2_guest_check "Ansible ping" "$BR_SRV_VMID" \
-    "cd $ANSIBLE_WORKDIR && ansible all -m ping" \
-    "ansible all -m ping failed" \
-    "check SSH users/ports and $ANSIBLE_WORKDIR/hosts"
+  module2_guest_check "Docker app on BR-SRV" "$BR_SRV_VMID" \
+    "docker ps --format '{{.Names}} {{.Status}}' | grep -q '^$DOCKER_DB_CONTAINER .*Up' && docker ps --format '{{.Names}} {{.Status}}' | grep -q '^$DOCKER_APP_CONTAINER .*Up' && ss -tulpen | grep -q ':$DOCKER_APP_PORT'" \
+    "Docker containers $DOCKER_DB_CONTAINER/$DOCKER_APP_CONTAINER are not Up or port $DOCKER_APP_PORT is not listening" \
+    "run: bash run.sh run module2-docker"
 
-  echo "[WARN] Samba DC not implemented yet"
-  echo "[WARN] Docker/Web/DNAT/Proxy/Basic auth not implemented yet"
+  module2_guest_check "Docker app HTTP from HQ-CLI" "$HQ_CLI_VMID" \
+    "url='http://$BR_SRV_ADDR:$DOCKER_APP_PORT'; if command -v curl >/dev/null 2>&1; then curl -fsSL \"\$url\"; else wget -qO- \"\$url\"; fi | grep -qi '<html\\|uvicorn\\|student'" \
+    "GET http://$BR_SRV_ADDR:$DOCKER_APP_PORT from HQ-CLI did not return app HTML" \
+    "check docker logs site and firewall/routes"
+
+  module2_guest_check "Web service on HQ-SRV" "$HQ_SRV_VMID" \
+    "(systemctl is-active --quiet $WEB_HTTP_SERVICE || systemctl is-active --quiet apache2 || systemctl is-active --quiet httpd) && (systemctl is-active --quiet mariadb || systemctl is-active --quiet mysqld) && ss -tulpen | grep -q ':80' && test -f $WEB_DOCROOT/index.php && ! grep -qi 'It works' $WEB_DOCROOT/index.php" \
+    "Apache/PHP/MariaDB web stack is not active or index.php is missing" \
+    "run: bash run.sh run module2-web"
+
+  module2_guest_check "Web service HTTP from HQ-CLI" "$HQ_CLI_VMID" \
+    "url='http://$HQ_SRV_ADDR'; if command -v curl >/dev/null 2>&1; then curl -fsSL -D /tmp/module2-web-hdr \"\$url\" -o /tmp/module2-web-body; else wget -S -O /tmp/module2-web-body \"\$url\" 2>/tmp/module2-web-hdr; fi; grep -q '200\\|HTTP/.* 200' /tmp/module2-web-hdr && grep -qi '<html\\|php\\|database\\|employee' /tmp/module2-web-body && ! grep -qi 'It works' /tmp/module2-web-body" \
+    "GET http://$HQ_SRV_ADDR from HQ-CLI did not return expected HQ-SRV web page" \
+    "check $WEB_DOCROOT/index.php, database credentials, and Apache DocumentRoot"
+
+  module2_guest_check "DNAT rules and access" "$ISP_VMID" \
+    "timeout 5 bash -c 'cat < /dev/null > /dev/tcp/$HQ_RTR_WAN_ADDR/$SSH_PORT' && timeout 5 bash -c 'cat < /dev/null > /dev/tcp/$HQ_RTR_WAN_ADDR/$DOCKER_APP_PORT' && timeout 5 bash -c 'cat < /dev/null > /dev/tcp/$BR_RTR_WAN_ADDR/$SSH_PORT' && timeout 5 bash -c 'cat < /dev/null > /dev/tcp/$BR_RTR_WAN_ADDR/$DOCKER_APP_PORT'" \
+    "DNAT ports are not reachable from ISP" \
+    "run: bash run.sh run module2-dnat"
+
+  module2_guest_check "Nginx reverse proxy" "$ISP_VMID" \
+    "systemctl is-active --quiet nginx && ss -tulpen | grep -q ':80' && wget -qO- --header='Host: $DOCKER_DOMAIN' http://127.0.0.1 | grep -qi '<html\\|uvicorn\\|student'" \
+    "nginx is inactive or docker reverse proxy does not return app HTML" \
+    "run: bash run.sh run module2-nginx"
+
+  module2_guest_check "Basic Auth" "$ISP_VMID" \
+    "wget -S -O - --header='Host: $WEB_DOMAIN' http://127.0.0.1 2>&1 | grep -q '401 Unauthorized' && wget --user='$BASIC_AUTH_USER' --password='$BASIC_AUTH_PASS' -qO- --header='Host: $WEB_DOMAIN' http://127.0.0.1 | grep -qi '<html\\|php\\|database\\|employee'" \
+    "web.au-team.irpo auth did not return 401 without credentials and 200/content with credentials" \
+    "check $BASIC_AUTH_FILE permissions and nginx proxy_pass"
+
+  module2_guest_check "Nginx and Basic Auth from HQ-CLI" "$HQ_CLI_VMID" \
+    "curl -s -o /tmp/module2-web-noauth -w '%{http_code}' http://$WEB_DOMAIN | grep -q '^401$' && curl -fsSL -u '$BASIC_AUTH_USER:$BASIC_AUTH_PASS' http://$WEB_DOMAIN | grep -qi '<html\\|php\\|database\\|employee' && curl -fsSL http://$DOCKER_DOMAIN | grep -qi '<html\\|uvicorn\\|student'" \
+    "HQ-CLI reverse proxy checks for web/docker domains failed" \
+    "check HQ-CLI DNS, nginx on ISP, DNAT, and basic auth"
+
+  module2_guest_check "Yandex Browser" "$HQ_CLI_VMID" \
+    "rpm -qa | grep -q '$YANDEX_BROWSER_PACKAGE' && test -x /usr/bin/yandex-browser-stable && test -f /usr/share/applications/yandex-browser.desktop && /usr/bin/yandex-browser-stable --version | grep -qi Yandex" \
+    "Yandex Browser package/binary/desktop/version check failed" \
+    "run: bash run.sh run module2-browser"
+
+  module2_guest_check "Samba AD DC" "$BR_SRV_VMID" \
+    "samba-tool domain info 127.0.0.1 | grep -qi 'Forest.*$DOMAIN' && host -t SRV _ldap._tcp.$DOMAIN 127.0.0.1 >/dev/null && host -t SRV _kerberos._udp.$DOMAIN 127.0.0.1 >/dev/null" \
+    "Samba AD DC domain info or SRV records failed" \
+    "run: bash run.sh run module2-samba"
+
+  module2_guest_check "Domain users and hq group" "$BR_SRV_VMID" \
+    "for i in 1 2 3 4 5; do samba-tool user list | grep -q '${DOMAIN_USERS_PREFIX}'\"\$i\"'${DOMAIN_USERS_SUFFIX}'; done && samba-tool group listmembers $DOMAIN_GROUP | grep -q '${DOMAIN_USERS_PREFIX}1${DOMAIN_USERS_SUFFIX}' && wbinfo -u | grep -q '${DOMAIN_USERS_PREFIX}1${DOMAIN_USERS_SUFFIX}'" \
+    "Domain users hquser1-hquser5 or group hq membership missing" \
+    "check samba-tool user list and samba-tool group listmembers $DOMAIN_GROUP"
+
+  module2_guest_check "HQ-CLI joined to domain" "$HQ_CLI_VMID" \
+    "net ads testjoin | grep -q 'Join is OK' && wbinfo -t && wbinfo -u | grep -q '${DOMAIN_USERS_PREFIX}1${DOMAIN_USERS_SUFFIX}' && wbinfo -g | grep -q '$DOMAIN_GROUP' && id '${DOMAIN_USERS_PREFIX}1${DOMAIN_USERS_SUFFIX}' | grep -q '$DOMAIN_GROUP'" \
+    "HQ-CLI domain join, winbind trust, or user lookup failed" \
+    "check /etc/samba/smb.conf, /etc/krb5.conf, DNS and winbind"
+
+  module2_guest_check "Limited sudo for hq group" "$HQ_CLI_VMID" \
+    "visudo -cf /etc/sudoers.d/domain-hq-limited && sudo -l -U '${DOMAIN_USERS_PREFIX}1${DOMAIN_USERS_SUFFIX}' | grep -q '/usr/bin/id' && sudo -l -U '${DOMAIN_USERS_PREFIX}1${DOMAIN_USERS_SUFFIX}' | grep -q '/bin/cat' && sudo -l -U '${DOMAIN_USERS_PREFIX}1${DOMAIN_USERS_SUFFIX}' | grep -q '/bin/grep'" \
+    "Limited sudo policy for hq group is missing or invalid" \
+    "check /etc/sudoers.d/domain-hq-limited"
+
   echo
   if [[ "$module2_failed" -eq 0 ]]; then
-    echo "RESULT: MODULE 2 PARTIAL PASSED"
+    echo "RESULT: MODULE 2 PASSED"
   else
-    echo "RESULT: MODULE 2 PARTIAL FAILED"
+    echo "RESULT: MODULE 2 FAILED"
     return 1
   fi
 }
@@ -1110,16 +1219,16 @@ MODULE 2 PLANNED STEPS
   ISP chrony server with stratum ${NTP_STRATUM:-8}; HQ-SRV/HQ-CLI/BR-RTR/BR-SRV as clients.
 [RUN] 04-br-srv-ansible.sh
   Ansible control node on BR-SRV in ${ANSIBLE_WORKDIR:-/etc/ansible}; inventory HQ-SRV/HQ-CLI/HQ-RTR/BR-RTR; ansible all -m ping check.
-[PLAN] Samba DC
+[RUN] Samba DC
   Samba DC on BR-SRV for ${DOMAIN:-au-team.irpo}/${REALM:-AU-TEAM.IRPO}, users ${DOMAIN_USERS_PREFIX:-hquser}1-${DOMAIN_USERS_PREFIX:-hquser}${DOMAIN_USERS_COUNT:-5}, group ${DOMAIN_GROUP:-hq}, sudo only cat/grep/id, HQ-CLI domain join.
-[PLAN] Docker/Web
+[RUN] Docker/Web
   Docker on BR-SRV: images ${DOCKER_IMAGE_APP:-site_latest}/${DOCKER_IMAGE_DB:-postgresql_latest}, containers ${DOCKER_APP_CONTAINER:-site}/${DOCKER_DB_CONTAINER:-db}, DB ${DOCKER_DB_NAME:-testdb3}, user ${DOCKER_DB_USER:-test3c}, port ${DOCKER_APP_PORT:-8083}; Apache + MariaDB on HQ-SRV: DB ${WEB_DB_NAME:-webdb}, user ${WEB_DB_USER:-web3}, import dump.sql, copy index.php/images.
-[PLAN] DNAT/Proxy
+[RUN] DNAT/Proxy
   DNAT ${DOCKER_APP_PORT:-8083}: HQ-RTR -> HQ-SRV web, BR-RTR -> BR-SRV docker; DNAT ${SSH_PORT:-2013}: HQ-RTR -> HQ-SRV SSH, BR-RTR -> BR-SRV SSH; nginx reverse proxy on ISP: ${WEB_DOMAIN:-web.au-team.irpo} -> HQ-SRV web, ${DOCKER_DOMAIN:-docker.au-team.irpo} -> BR-SRV site.
-[PLAN] Basic auth
+[RUN] Basic auth / Browser
   Basic auth on ISP for ${WEB_DOMAIN:-web.au-team.irpo}: ${BASIC_AUTH_USER:-Kazimirc}, file ${BASIC_AUTH_FILE:-/etc/nginx/.htpasswd}; firewall rules after DNAT/proxy are confirmed.
 
-Samba, Docker/Web, DNAT/Proxy, and Basic auth are planned only in this step.
+All Module 2 blocks are automated in this revision; reruns are intended to be idempotent.
 EOF
 }
 
@@ -1152,7 +1261,7 @@ demo_module2() {
   echo "============================================================"
   echo "MODULE 2 DEMO RUN"
   echo "============================================================"
-  echo "This mode configures storage, NFS, chrony, and Ansible, then runs partial checks."
+  echo "This mode configures Module 2 blocks in safe order, then runs full checks."
 
   if ! module2_step "prereq module2" "bash run.sh prereq module2" "Run first: curl -fsSL https://raw.githubusercontent.com/Arsen11y/pve/main/m1.sh | bash" show_module2_prereq; then
     echo "RESULT: MODULE 2 DEMO BLOCKED"
@@ -1174,14 +1283,38 @@ demo_module2() {
     echo "RESULT: MODULE 2 FAILED"
     return 1
   fi
+  if ! module2_step "run module2-docker" "bash run.sh run module2-docker" "check Additional.iso on BR-SRV and docker service" run_module2_docker; then
+    echo "RESULT: MODULE 2 FAILED"
+    return 1
+  fi
+  if ! module2_step "run module2-web" "bash run.sh run module2-web" "check Additional.iso on HQ-SRV and Apache/MariaDB packages" run_module2_web; then
+    echo "RESULT: MODULE 2 FAILED"
+    return 1
+  fi
+  if ! module2_step "run module2-dnat" "bash run.sh run module2-dnat" "check nftables on HQ-RTR/BR-RTR" run_module2_dnat; then
+    echo "RESULT: MODULE 2 FAILED"
+    return 1
+  fi
+  if ! module2_step "run module2-nginx" "bash run.sh run module2-nginx" "check nginx config and DNAT backends from ISP" run_module2_nginx; then
+    echo "RESULT: MODULE 2 FAILED"
+    return 1
+  fi
+  if ! module2_step "run module2-browser" "bash run.sh run module2-browser" "check Yandex Browser package availability on HQ-CLI" run_module2_browser; then
+    echo "RESULT: MODULE 2 FAILED"
+    return 1
+  fi
+  if ! module2_step "run module2-samba" "bash run.sh run module2-samba" "check Samba packages and domain DNS from BR-SRV/HQ-CLI" run_module2_samba; then
+    echo "RESULT: MODULE 2 FAILED"
+    return 1
+  fi
   if ! module2_step "check module2" "bash run.sh check module2" "inspect failed check output above and rerun the failed block" show_module2_status; then
-    echo "RESULT: MODULE 2 PARTIAL FAILED"
+    echo "RESULT: MODULE 2 FAILED"
     return 1
   fi
 
   print_module2_plan
   echo
-  echo "RESULT: MODULE 2 PARTIAL PASSED"
+  echo "RESULT: MODULE 2 PASSED"
 }
 
 main() {
@@ -1265,6 +1398,27 @@ main() {
           ;;
         module2-ansible)
           run_module2_ansible
+          ;;
+        module2-docker)
+          run_module2_docker
+          ;;
+        module2-web)
+          run_module2_web
+          ;;
+        module2-dnat)
+          run_module2_dnat
+          ;;
+        module2-nginx)
+          run_module2_nginx
+          ;;
+        module2-browser)
+          run_module2_browser
+          ;;
+        module2-samba)
+          run_module2_samba
+          ;;
+        module2)
+          run_module2_all
           ;;
         *)
           usage

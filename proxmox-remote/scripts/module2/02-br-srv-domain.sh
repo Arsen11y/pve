@@ -11,19 +11,157 @@ if [[ -f /tmp/de-run/scripts/lib/common.sh ]]; then
   source /tmp/de-run/scripts/lib/common.sh
 fi
 
-echo "Planned Module 2 Samba domain actions for BR-SRV/HQ-CLI"
-echo "- Prepare Samba DC for ${DOMAIN:-au-team.irpo} / ${REALM:-AU-TEAM.IRPO}."
-echo "- Create/import users named ${DOMAIN_USERS_PREFIX:-hquser}1-${DOMAIN_USERS_PREFIX:-hquser}${DOMAIN_USERS_COUNT:-5}; expected CSV on BR-SRV: ${USERS_CSV_PATH:-/opt/users.csv}."
-echo "- Add domain users to group ${DOMAIN_GROUP:-hq}."
-echo "- Limit sudo for ${DOMAIN_GROUP:-hq} to ${SUDO_LIMITED_COMMANDS:-cat,grep,id}."
-echo "- Join HQ-CLI to the domain after prereq checks pass."
-echo "- Validate users.csv schema before import; do not assume column order."
-echo "Read-only local checks:"
-hostname || true
-id "${SSH_USER:-sshuser}" || true
-if [[ -e "${USERS_CSV_PATH:-/opt/users.csv}" ]]; then
-  ls -l "${USERS_CSV_PATH:-/opt/users.csv}"
-else
-  echo "users.csv not found at ${USERS_CSV_PATH:-/opt/users.csv}; this is expected unless running on BR-SRV after file delivery."
-fi
-echo "TODO: no Samba provisioning in scaffold mode."
+service_restart_enable() {
+  local svc
+  for svc in "$@"; do
+    if systemctl cat "$svc" >/dev/null 2>&1; then
+      systemctl enable "$svc" || true
+      systemctl restart "$svc"
+      return 0
+    fi
+  done
+  return 1
+}
+
+host="$(hostname | tr '[:upper:]' '[:lower:]')"
+
+case "$host" in
+  br-srv*)
+    safe_apt_install samba samba-dc samba-client krb5-kinit bind-utils
+    test -x /usr/sbin/samba
+    test -x /usr/bin/samba-tool
+    test -x /usr/bin/smbclient
+    test -x /usr/bin/kinit
+
+    hostnamectl set-hostname "br-srv.$DOMAIN" || true
+    cat > /etc/hosts <<EOFINNER
+127.0.0.1 localhost
+$BR_SRV_ADDR br-srv.$DOMAIN br-srv BR-SRV
+EOFINNER
+
+    if ! samba-tool domain info 127.0.0.1 >/dev/null 2>&1; then
+      systemctl disable --now smb nmb winbind 2>/dev/null || true
+      if [[ -d /etc/samba && ! -d /etc/samba.pre-module2 ]]; then
+        cp -a /etc/samba /etc/samba.pre-module2
+      fi
+      rm -f /etc/samba/smb.conf
+      samba-tool domain provision \
+        --use-rfc2307 \
+        --realm="$REALM" \
+        --domain="$AD_NETBIOS_DOMAIN" \
+        --server-role=dc \
+        --dns-backend=SAMBA_INTERNAL \
+        --adminpass="$DOMAIN_PASS"
+      cp /var/lib/samba/private/krb5.conf /etc/krb5.conf
+    else
+      echo "[OK] Samba domain already provisioned"
+    fi
+
+    cat > /etc/resolv.conf <<EOFINNER
+nameserver 127.0.0.1
+nameserver $HQ_SRV_ADDR
+search $DOMAIN
+domain $DOMAIN
+EOFINNER
+
+    service_restart_enable samba samba-ad-dc
+
+    samba-tool dns delete 127.0.0.1 "$DOMAIN" br-srv A 172.17.0.1 -U "Administrator%$DOMAIN_PASS" 2>/dev/null || true
+    samba-tool dns delete 127.0.0.1 "$DOMAIN" br-srv A 172.18.0.1 -U "Administrator%$DOMAIN_PASS" 2>/dev/null || true
+    samba-tool dns add 127.0.0.1 "$DOMAIN" br-srv A "$BR_SRV_ADDR" -U "Administrator%$DOMAIN_PASS" 2>/dev/null || true
+    for rec in \
+      "hq-srv:$HQ_SRV_ADDR" \
+      "hq-rtr:$HQ_RTR_SRV_ADDR" \
+      "hq-cli:$HQ_CLI_ADDR" \
+      "br-rtr:$BR_RTR_LAN_ADDR" \
+      "web:$DNS_WEB_IP" \
+      "docker:$DNS_DOCKER_IP"; do
+      name="${rec%%:*}"
+      addr="${rec#*:}"
+      samba-tool dns add 127.0.0.1 "$DOMAIN" "$name" A "$addr" -U "Administrator%$DOMAIN_PASS" 2>/dev/null || true
+    done
+
+    samba-tool group show "$DOMAIN_GROUP" >/dev/null 2>&1 || samba-tool group add "$DOMAIN_GROUP"
+    for i in $(seq 1 "$DOMAIN_USERS_COUNT"); do
+      user="${DOMAIN_USERS_PREFIX}${i}${DOMAIN_USERS_SUFFIX}"
+      samba-tool user show "$user" >/dev/null 2>&1 || samba-tool user create "$user" "$DOMAIN_PASS"
+      samba-tool group addmembers "$DOMAIN_GROUP" "$user" 2>/dev/null || true
+    done
+
+    samba-tool domain info 127.0.0.1
+    host -t SRV "_ldap._tcp.$DOMAIN" 127.0.0.1 || true
+    host -t SRV "_kerberos._udp.$DOMAIN" 127.0.0.1 || true
+    printf '%s\n' "$DOMAIN_PASS" | kinit Administrator || true
+    klist || true
+    samba-tool user list | grep "$DOMAIN_USERS_PREFIX" || true
+    samba-tool group listmembers "$DOMAIN_GROUP" || true
+    wbinfo -u | grep "$DOMAIN_USERS_PREFIX" || true
+    echo "[OK] Samba AD DC configured on BR-SRV"
+    ;;
+
+  hq-cli*)
+    safe_apt_install samba samba-client krb5-kinit bind-utils winbind sudo
+    cat > /etc/resolv.conf <<EOFINNER
+nameserver $BR_SRV_ADDR
+nameserver $HQ_SRV_ADDR
+search $DOMAIN
+domain $DOMAIN
+EOFINNER
+
+    cat > /etc/krb5.conf <<EOFINNER
+[libdefaults]
+    default_realm = $REALM
+    dns_lookup_realm = false
+    dns_lookup_kdc = true
+EOFINNER
+
+    mkdir -p /etc/samba
+    cat > /etc/samba/smb.conf <<EOFINNER
+[global]
+    workgroup = $AD_NETBIOS_DOMAIN
+    realm = $REALM
+    security = ADS
+    winbind enum users = yes
+    winbind enum groups = yes
+    winbind use default domain = yes
+    template shell = /bin/bash
+    template homedir = /home/%U
+    idmap config * : backend = tdb
+    idmap config * : range = 3000-7999
+    idmap config $AD_NETBIOS_DOMAIN : backend = rid
+    idmap config $AD_NETBIOS_DOMAIN : range = 10000-999999
+EOFINNER
+
+    printf '%s\n' "$DOMAIN_PASS" | kinit Administrator || true
+    if ! net ads testjoin 2>/dev/null | grep -q 'Join is OK'; then
+      net ads join -U "Administrator%$DOMAIN_PASS"
+    fi
+
+    service_restart_enable winbind
+
+    sed -i 's/^passwd:.*/passwd: files winbind systemd/' /etc/nsswitch.conf || true
+    sed -i 's/^group:.*/group: files winbind systemd/' /etc/nsswitch.conf || true
+
+    mkdir -p /etc/sudoers.d
+    cat > /etc/sudoers.d/domain-hq-limited <<EOFINNER
+%$DOMAIN_GROUP ALL=(root) NOPASSWD: /usr/bin/id, /bin/id, /usr/bin/cat, /bin/cat, /usr/bin/grep, /bin/grep
+EOFINNER
+    chmod 440 /etc/sudoers.d/domain-hq-limited
+    visudo -cf /etc/sudoers.d/domain-hq-limited
+
+    net ads testjoin
+    wbinfo -t
+    wbinfo -u | grep "$DOMAIN_USERS_PREFIX"
+    wbinfo -g | grep "$DOMAIN_GROUP"
+    id "${DOMAIN_USERS_PREFIX}1${DOMAIN_USERS_SUFFIX}"
+    sudo -l -U "${DOMAIN_USERS_PREFIX}1${DOMAIN_USERS_SUFFIX}" || true
+    echo "[OK] HQ-CLI joined to Samba domain"
+    ;;
+
+  *)
+    echo "[FAIL] Unsupported Samba target host: $host"
+    echo "Command: hostname"
+    echo "Next hint: run module2-samba only on BR-SRV and HQ-CLI"
+    exit 1
+    ;;
+esac

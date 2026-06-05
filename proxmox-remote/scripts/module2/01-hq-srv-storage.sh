@@ -33,23 +33,33 @@ if [[ -n "$root_source" ]]; then
 fi
 
 candidate_disks=()
-while read -r name type size; do
-  [[ "$type" == "disk" ]] || continue
-  [[ "$name" != "$root_disk" ]] || continue
-  if (( size < 800000000 || size > 1300000000 )); then
-    continue
-  fi
-  if (( "$(lsblk -nr "/dev/$name" | wc -l)" > 1 )); then
-    continue
-  fi
-  if lsblk -nr -o MOUNTPOINT "/dev/$name" | grep -q .; then
-    continue
-  fi
-  if lsblk -nr -o FSTYPE "/dev/$name" | grep -q .; then
-    continue
-  fi
-  candidate_disks+=("/dev/$name")
-done < <(lsblk -dn -b -o NAME,TYPE,SIZE)
+manual_disks=(/dev/sdb /dev/sdc /dev/sdd)
+manual_ok=1
+for disk in "${manual_disks[@]}"; do
+  [[ -b "$disk" ]] || manual_ok=0
+done
+
+if [[ "$manual_ok" -eq 1 ]]; then
+  candidate_disks=("${manual_disks[@]}")
+else
+  while read -r name type size; do
+    [[ "$type" == "disk" ]] || continue
+    [[ "$name" != "$root_disk" ]] || continue
+    if (( size < 800000000 || size > 1300000000 )); then
+      continue
+    fi
+    if (( "$(lsblk -nr "/dev/$name" | wc -l)" > 1 )); then
+      continue
+    fi
+    if lsblk -nr -o MOUNTPOINT "/dev/$name" | grep -q .; then
+      continue
+    fi
+    if lsblk -nr -o FSTYPE "/dev/$name" | grep -q .; then
+      continue
+    fi
+    candidate_disks+=("/dev/$name")
+  done < <(lsblk -dn -b -o NAME,TYPE,SIZE)
+fi
 
 if [[ -b "$RAID_DEVICE" ]]; then
   echo "[OK] RAID device already exists: $RAID_DEVICE"
@@ -67,7 +77,7 @@ else
   for disk in "${selected_disks[@]}"; do
     mdadm --zero-superblock --force "$disk" 2>/dev/null || true
   done
-  yes | mdadm --create "$RAID_DEVICE" --level="$RAID_LEVEL" --raid-devices="$RAID_DISK_COUNT" "${selected_disks[@]}"
+  mdadm --create "$RAID_DEVICE" --force --run --level="$RAID_LEVEL" --raid-devices="$RAID_DISK_COUNT" "${selected_disks[@]}"
   udevadm settle 2>/dev/null || true
 fi
 
@@ -95,8 +105,17 @@ mount "$RAID_MOUNT" || mount -a
 
 mdadm --detail --scan > /etc/mdadm.conf
 
+if ! findmnt -n "$RAID_MOUNT" >/dev/null 2>&1; then
+  echo "[FAIL] $RAID_MOUNT is not mounted after configuration"
+  echo "Command: findmnt $RAID_MOUNT"
+  echo "Next hint: check mdadm --detail $RAID_DEVICE and /etc/fstab"
+  exit 1
+fi
+
 echo "[OK] RAID storage configured"
 cat /proc/mdstat || true
 lsblk || true
+mdadm --detail "$RAID_DEVICE" || true
 mount | grep "$RAID_MOUNT" || true
 df -h "$RAID_MOUNT" || true
+exit 0

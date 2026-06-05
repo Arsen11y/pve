@@ -13,8 +13,7 @@ fi
 
 echo "Module 2 prereq plan"
 echo "- Verify Module 1 routes, DNS, GRE/OSPF, and SSH baseline before changing services."
-echo "- Implemented blocks: RAID5 storage, NFS, Chrony, Ansible scaffold/check."
-echo "- Planned-only blocks: Samba DC, Docker app, web stack, DNAT, proxy, basic auth, and HQ-CLI browser."
+echo "- Implemented blocks: RAID5 storage, NFS, Chrony, Ansible, Docker, web, DNAT, nginx/basic auth, browser, Samba domain."
 echo "Read-only local checks:"
 hostname || true
 ip -br a || true

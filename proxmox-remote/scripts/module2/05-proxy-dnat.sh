@@ -11,16 +11,50 @@ if [[ -f /tmp/de-run/scripts/lib/common.sh ]]; then
   source /tmp/de-run/scripts/lib/common.sh
 fi
 
-echo "Planned Module 2 proxy/DNAT actions"
-echo "- Configure HQ-RTR DNAT port ${DOCKER_APP_PORT:-8083} to HQ-SRV web target ${DNAT_HQ_TARGET:-192.168.113.2:8083}."
-echo "- Configure BR-RTR DNAT port ${DOCKER_APP_PORT:-8083} to BR-SRV docker target ${DNAT_BR_TARGET:-192.168.10.2:8083}."
-echo "- Configure HQ-RTR DNAT port ${SSH_PORT:-2013} to HQ-SRV SSH target ${SSH_DNAT_HQ_TARGET:-192.168.113.2:2013}."
-echo "- Configure BR-RTR DNAT port ${SSH_PORT:-2013} to BR-SRV SSH target ${SSH_DNAT_BR_TARGET:-192.168.10.2:2013}."
-echo "- Configure nginx reverse proxy on ${REVERSE_PROXY_HOST:-isp.au-team.irpo}."
-echo "- Proxy ${WEB_DOMAIN:-web.au-team.irpo} to HQ-SRV web."
-echo "- Proxy ${DOCKER_DOMAIN:-docker.au-team.irpo} to BR-SRV site on port ${DOCKER_APP_PORT:-8083}."
-echo "- Configure basic auth for ${WEB_DOMAIN:-web.au-team.irpo}: ${BASIC_AUTH_USER:-Kazimirc}, file ${BASIC_AUTH_FILE:-/etc/nginx/.htpasswd}."
-echo "Read-only local checks:"
-nft list ruleset || true
-ss -tulpen | grep -E ":(${DOCKER_APP_PORT:-8083}|${SSH_PORT:-2013}|80|443)" || true
-echo "TODO: no nftables or nginx changes in scaffold mode."
+write_router_nat() {
+  local wan_if="$1"
+  local wan_addr="$2"
+  local web_target="$3"
+  local ssh_target="$4"
+
+  enable_ip_forward
+  mkdir -p /etc/nftables
+  cat > /etc/nftables/nftables.nft <<EOFINNER
+#!/usr/sbin/nft -f
+flush ruleset
+
+table ip nat {
+    chain prerouting {
+        type nat hook prerouting priority dstnat; policy accept;
+        iifname "$wan_if" ip daddr $wan_addr tcp dport $SSH_PORT dnat to $ssh_target
+        iifname "$wan_if" ip daddr $wan_addr tcp dport $DOCKER_APP_PORT dnat to $web_target
+    }
+
+    chain postrouting {
+        type nat hook postrouting priority srcnat; policy accept;
+        oifname "$wan_if" masquerade
+    }
+}
+EOFINNER
+  systemctl enable nftables
+  systemctl restart nftables
+  nft list ruleset
+}
+
+host="$(hostname | tr '[:upper:]' '[:lower:]')"
+case "$host" in
+  hq-rtr*)
+    write_router_nat "$HQ_RTR_WAN_IF" "$HQ_RTR_WAN_ADDR" "$HQ_SRV_ADDR:80" "$HQ_SRV_ADDR:$SSH_PORT"
+    echo "[OK] HQ-RTR DNAT configured"
+    ;;
+  br-rtr*)
+    write_router_nat "$BR_RTR_WAN_IF" "$BR_RTR_WAN_ADDR" "$BR_SRV_ADDR:$DOCKER_APP_PORT" "$BR_SRV_ADDR:$SSH_PORT"
+    echo "[OK] BR-RTR DNAT configured"
+    ;;
+  *)
+    echo "[FAIL] Unsupported DNAT target host: $host"
+    echo "Command: hostname"
+    echo "Next hint: run module2-dnat only on HQ-RTR and BR-RTR"
+    exit 1
+    ;;
+esac
