@@ -1,7 +1,7 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 set -euo pipefail
 
-DEFAULT_RAW_URL="https://raw.githubusercontent.com/Arsen11y/pve/main/proxmox-remote"
+DEFAULT_RAW_URL="https://raw.githubusercontent.com/Arsen11y/pve/module1-only/proxmox-remote"
 DE_RAW_URL="${DE_RAW_URL:-$DEFAULT_RAW_URL}"
 INV="${DE_INVENTORY:-/root/de-inventory.env}"
 REQUEST_COMMAND="${1:-}"
@@ -85,7 +85,7 @@ load_inventory() {
   exit 1
 }
 
-if [[ ! ( "$REQUEST_COMMAND" == "demo" && ( "$REQUEST_SUBCOMMAND" == "module1" || "$REQUEST_SUBCOMMAND" == "module2" ) ) ]]; then
+if [[ ! ( "$REQUEST_COMMAND" == "demo" && "$REQUEST_SUBCOMMAND" == "module1" ) ]]; then
   load_inventory
 fi
 
@@ -103,10 +103,7 @@ run.sh - remote Proxmox runner through qemu-guest-agent.
 Commands:
   check                    Check VM presence and qemu-guest-agent
   check module1            Compact Module 1 GRE/OSPF/DNS/end-to-end report
-  check module2            Module 2 prereq checks only
   demo module1             Prepare VLANs, run all Module 1 targets, then check
-  demo module2             Check prereq and print planned Module 2 steps
-  prereq module2           Same as check module2
   prepare-vlans            Add/replace Proxmox VLAN tags for HQ-SRV/HQ-CLI
   list                     Show qm list
   ifaces <target>          Show ip -br a inside VM
@@ -839,160 +836,6 @@ demo_module1() {
   demo_module1_failed
 }
 
-module2_failed=0
-
-module2_fail() {
-  local label="$1"
-  local reason="$2"
-  local hint="$3"
-
-  module2_failed=1
-  echo "[FAIL] $label"
-  echo "Reason: $reason"
-  echo "Next hint: $hint"
-}
-
-module2_ok() {
-  local label="$1"
-  echo "[OK] $label"
-}
-
-module2_agent_check() {
-  local label="$1"
-  local vmid="$2"
-
-  if guest_ping "$vmid"; then
-    module2_ok "$label"
-  else
-    module2_fail "$label" "qemu-guest-agent is not reachable" "check VM power state and qemu-guest-agent service"
-  fi
-}
-
-module2_guest_check() {
-  local label="$1"
-  local vmid="$2"
-  local cmd="$3"
-  local reason="$4"
-  local hint="$5"
-  local tmpdir
-  local out_file
-  local err_file
-  local meta_file
-
-  tmpdir="$(mktemp -d)"
-  out_file="$tmpdir/stdout"
-  err_file="$tmpdir/stderr"
-  meta_file="$tmpdir/meta"
-
-  if guest_probe "$vmid" "$cmd" "$out_file" "$err_file" "$meta_file"; then
-    module2_ok "$label"
-  else
-    module2_fail "$label" "$reason" "$hint"
-    print_file_block "STDOUT" "$out_file"
-    print_file_block "STDERR" "$err_file"
-  fi
-
-  rm -rf "$tmpdir"
-}
-
-show_module2_prereq() {
-  if [[ "$INVENTORY_LOADED" -ne 1 ]]; then
-    load_inventory
-  fi
-
-  echo
-  echo "============================================================"
-  echo "MODULE 2 PREREQ CHECK SUMMARY"
-  echo "============================="
-  echo
-
-  module2_failed=0
-
-  if show_module1_status; then
-    module2_ok "Module 1 check passed"
-  else
-    module2_fail "Module 1 check passed" "Module 1 check failed" "run: bash run.sh check module1"
-  fi
-
-  module2_agent_check "HQ-SRV reachable" "$HQ_SRV_VMID"
-  module2_agent_check "BR-SRV reachable" "$BR_SRV_VMID"
-  module2_agent_check "HQ-CLI reachable" "$HQ_CLI_VMID"
-  module2_agent_check "HQ-RTR reachable" "$HQ_RTR_VMID"
-  module2_agent_check "BR-RTR reachable" "$BR_RTR_VMID"
-
-  module2_guest_check "DNS hq-srv/web/docker works" "$HQ_SRV_VMID" \
-    "test \"\$(dig +short @127.0.0.1 hq-srv.${DOMAIN})\" = $HQ_SRV_ADDR && test \"\$(dig +short @127.0.0.1 web.${DOMAIN})\" = $DNS_WEB_IP && test \"\$(dig +short @127.0.0.1 docker.${DOMAIN})\" = $DNS_DOCKER_IP" \
-    "DNS records do not match expected Module 1 values" \
-    "check named-direct and zone files on HQ-SRV"
-
-  module2_guest_check "SSH $SSH_PORT listens on HQ-SRV" "$HQ_SRV_VMID" \
-    "ss -tulpen | grep -q ':$SSH_PORT'" \
-    "sshd is not listening on port $SSH_PORT on HQ-SRV" \
-    "check systemctl status sshd --no-pager"
-
-  module2_guest_check "SSH $SSH_PORT listens on BR-SRV" "$BR_SRV_VMID" \
-    "ss -tulpen | grep -q ':$SSH_PORT'" \
-    "sshd is not listening on port $SSH_PORT on BR-SRV" \
-    "check systemctl status sshd --no-pager"
-
-  echo
-  if [[ "$module2_failed" -eq 0 ]]; then
-    echo "RESULT: MODULE 2 PREREQ PASSED"
-  else
-    echo "RESULT: MODULE 2 PREREQ FAILED"
-    return 1
-  fi
-}
-
-print_module2_plan() {
-  cat <<EOF
-
-============================================================
-MODULE 2 PLANNED STEPS
-======================
-
-[PLAN] 00-prereq.sh
-  Verify Module 1 baseline, DNS, qemu-guest-agent, VLANs $VLAN_SRV/$VLAN_CLI/$VLAN_MGMT, and SSH $SSH_PORT.
-[PLAN] 01-hq-srv-storage.sh
-  RAID${RAID_LEVEL:-5} from ${RAID_DISK_COUNT:-3} x ${RAID_DISK_SIZE_GB:-1}GB disks on HQ-SRV, ${RAID_DEVICE:-/dev/md3}, mdadm.conf, ext4, mount ${RAID_MOUNT:-/raid}, NFS ${NFS_DIR:-/raid/nfs}, HQ-CLI automount ${NFS_CLIENT_MOUNT:-/mnt/nfs}.
-[PLAN] 02-br-srv-domain.sh
-  Samba DC on BR-SRV for ${DOMAIN:-au-team.irpo}/${REALM:-AU-TEAM.IRPO}, users ${DOMAIN_USERS_PREFIX:-hquser}1-${DOMAIN_USERS_PREFIX:-hquser}${DOMAIN_USERS_COUNT:-5}, group ${DOMAIN_GROUP:-hq}, sudo only cat/grep/id, HQ-CLI domain join.
-[PLAN] 03-time-ansible.sh
-  Chrony server role ${NTP_SERVER_ROLE:-ISP}, stratum ${NTP_STRATUM:-8}, clients HQ-SRV/HQ-CLI/BR-RTR/BR-SRV; Ansible on BR-SRV in ${ANSIBLE_WORKDIR:-/etc/ansible}, ansible all -m ping; optional ${HQ_CLI_BROWSER:-Yandex Browser} on HQ-CLI.
-[PLAN] 04-web-docker.sh
-  Docker on BR-SRV: images ${DOCKER_IMAGE_APP:-site_latest}/${DOCKER_IMAGE_DB:-postgresql_latest}, containers ${DOCKER_APP_CONTAINER:-site}/${DOCKER_DB_CONTAINER:-db}, DB ${DOCKER_DB_NAME:-testdb3}, user ${DOCKER_DB_USER:-test3c}, port ${DOCKER_APP_PORT:-8083}; Apache + MariaDB on HQ-SRV: DB ${WEB_DB_NAME:-webdb}, user ${WEB_DB_USER:-web3}, import dump.sql, copy index.php/images.
-[PLAN] 05-proxy-dnat.sh
-  DNAT ${DOCKER_APP_PORT:-8083}: HQ-RTR -> HQ-SRV web, BR-RTR -> BR-SRV docker; DNAT ${SSH_PORT:-2013}: HQ-RTR -> HQ-SRV SSH, BR-RTR -> BR-SRV SSH; nginx reverse proxy on ISP: ${WEB_DOMAIN:-web.au-team.irpo} -> HQ-SRV web, ${DOCKER_DOMAIN:-docker.au-team.irpo} -> BR-SRV site.
-[PLAN] 06-security-firewall.sh
-  Basic auth on ISP for ${WEB_DOMAIN:-web.au-team.irpo}: ${BASIC_AUTH_USER:-Kazimirc}, file ${BASIC_AUTH_FILE:-/etc/nginx/.htpasswd}; firewall rules after DNAT/proxy are confirmed.
-[PLAN] 07-logging-monitoring-backup.sh
-  CUPS PDF, rsyslog, monitoring ${MON_DOMAIN:-mon.au-team.irpo}, HQ-SRV backup ${BACKUP_DIR:-/backup}.
-
-No heavy services are configured by demo module2 yet.
-EOF
-}
-
-demo_module2() {
-  if [[ "$INVENTORY_LOADED" -ne 1 ]]; then
-    ensure_demo_inventory
-    load_inventory
-  fi
-
-  echo "============================================================"
-  echo "MODULE 2 DEMO SCAFFOLD"
-  echo "============================================================"
-  echo "This mode checks prereq only and prints the planned steps."
-
-  if ! show_module2_prereq; then
-    echo "RESULT: MODULE 2 DEMO BLOCKED"
-    return 1
-  fi
-
-  print_module2_plan
-  echo
-  echo "RESULT: MODULE 2 DEMO READY"
-}
-
 main() {
   need_root
   case "${1:-}" in
@@ -1000,9 +843,6 @@ main() {
       case "${2:-}" in
         module1)
           show_module1_status
-          ;;
-        module2)
-          show_module2_prereq
           ;;
         *)
           check_all
@@ -1016,20 +856,6 @@ main() {
       case "${2:-}" in
         module1)
           demo_module1
-          ;;
-        module2)
-          demo_module2
-          ;;
-        *)
-          usage
-          exit 1
-          ;;
-      esac
-      ;;
-    prereq)
-      case "${2:-}" in
-        module2)
-          show_module2_prereq
           ;;
         *)
           usage
